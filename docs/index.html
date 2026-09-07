@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI Gmail Job Hunter & Notification Agent</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;600&family=Inter:wght@400;500;600&family=Outfit:wght@500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <div class="app-container">
+    <header class="app-header">
+      <div class="brand-section">
+        <div class="brand-logo">📬</div>
+        <div class="brand-info">
+          <h1>AI Gmail Job Agent</h1>
+          <div class="brand-meta">
+            <span>Monitoring: <strong id="header-target-email">deepak.gvit@gmail.com</strong></span>
+            <div class="status-pill">
+              <span class="status-dot"></span>
+              <span id="live-connection-status">Online (Mobile Dashboard)</span>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="header-actions">
+        <button id="btn-check-now" class="btn btn-primary" onclick="triggerCheckNow()">
+          <span>⚡ Check Gmail Now</span>
+        </button>
+        <button id="btn-simulate" class="btn btn-sim" onclick="openSimulateMenu()">
+          <span>🧪 Simulate Job Alerts ▾</span>
+        </button>
+        <button class="btn btn-secondary" onclick="openMobileModal()">
+          <span>📱 Mobile Sync</span>
+        </button>
+        <button class="btn btn-secondary" onclick="openLogsModal()">
+          <span>📋 History</span>
+        </button>
+        <button class="btn btn-secondary" onclick="openSettingsModal()">
+          <span>⚙️ Settings</span>
+        </button>
+      </div>
+    </header>
+
+    <section class="public-url-bar" id="public-url-banner">
+      <div class="public-url-info">
+        <span>🌐 <strong>Public Mobile Dashboard URL:</strong></span>
+        <span id="display-public-url" class="url-badge">Loading...</span>
+      </div>
+      <div style="display:flex; gap:8px;">
+        <button class="btn btn-secondary" style="font-size:0.8rem; padding:4px 10px;" onclick="copyPublicUrl()">
+          <span>📋 Copy Link</span>
+        </button>
+        <button class="btn btn-primary" style="font-size:0.8rem; padding:4px 10px;" onclick="openMobileModal()">
+          <span>📱 Scan QR for Phone</span>
+        </button>
+      </div>
+    </section>
+
+    <section class="countdown-banner">
+      <div class="countdown-info">
+        <div class="timer-box">
+          <span>⏳ Next Check In:</span>
+          <span id="countdown-timer" class="timer-digits">15:00</span>
+        </div>
+        <div style="font-size: 0.85rem; color: var(--text-muted);">
+          <span>Last Checked: <strong id="last-check-text" style="color: #fff;">Active</strong></span>
+        </div>
+      </div>
+      <div style="font-size: 0.82rem; color: var(--text-dim); display: flex; align-items: center; gap: 8px;">
+        <span style="display:inline-block; width:8px; height:8px; background:#6366f1; border-radius:50%;"></span>
+        <span>Scanning: LinkedIn, Naukri, Indeed, Glassdoor & Inbound Mails</span>
+      </div>
+    </section>
+
+    <section class="stats-grid">
+      <div class="stat-card total">
+        <div class="stat-icon">🎯</div>
+        <div class="stat-content">
+          <h3>Total Job Openings</h3>
+          <div id="stat-total-jobs" class="stat-number">0</div>
+        </div>
+      </div>
+      <div class="stat-card new-roles">
+        <div class="stat-icon">✨</div>
+        <div class="stat-content">
+          <h3>Active Openings</h3>
+          <div id="stat-new-jobs" class="stat-number">0</div>
+        </div>
+      </div>
+      <div class="stat-card applied">
+        <div class="stat-icon">✅</div>
+        <div class="stat-content">
+          <h3>Applied / Strikethrough</h3>
+          <div id="stat-applied-jobs" class="stat-number">0</div>
+        </div>
+      </div>
+      <div class="stat-card repeat">
+        <div class="stat-icon">⚠️</div>
+        <div class="stat-content">
+          <h3>Repeat Companies</h3>
+          <div id="stat-repeat-companies" class="stat-number">0</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="toolbar">
+      <div class="toolbar-row">
+        <div class="search-box">
+          <span class="search-icon">🔍</span>
+          <input type="text" id="search-input" placeholder="Search by job title, company, skills, location, platform..." oninput="handleSearch(this.value)">
+        </div>
+        <div class="filter-tabs">
+          <button class="filter-tab active" data-status="ALL" onclick="setFilter('ALL', this)">All Postings</button>
+          <button class="filter-tab" data-status="NEW" onclick="setFilter('NEW', this)">Open Roles</button>
+          <button class="filter-tab" data-status="APPLIED" onclick="setFilter('APPLIED', this)">Already Applied (Strike/Red)</button>
+        </div>
+      </div>
+
+      <div class="toolbar-row" style="border-top: 1px solid var(--border-color); padding-top: 12px;">
+        <div class="platform-tabs">
+          <span style="font-size:0.8rem; color:var(--text-muted); font-weight:600;">Platform Source:</span>
+          <button class="platform-tab active" data-platform="ALL" onclick="setPlatformFilter('ALL', this)">All Platforms</button>
+          <button class="platform-tab" data-platform="LinkedIn" onclick="setPlatformFilter('LinkedIn', this)">LinkedIn</button>
+          <button class="platform-tab" data-platform="Naukri" onclick="setPlatformFilter('Naukri', this)">Naukri</button>
+          <button class="platform-tab" data-platform="Indeed" onclick="setPlatformFilter('Indeed', this)">Indeed</button>
+          <button class="platform-tab" data-platform="Glassdoor" onclick="setPlatformFilter('Glassdoor', this)">Glassdoor</button>
+          <button class="platform-tab" data-platform="Direct" onclick="setPlatformFilter('Direct', this)">Direct Recruiter</button>
+        </div>
+      </div>
+    </section>
+
+    <main id="job-feed-container" class="job-feed">
+      <div class="empty-state">
+        <div class="empty-icon">⏳</div>
+        <h3>Loading Job Openings...</h3>
+        <p>Connecting to database and scheduler...</p>
+      </div>
+    </main>
+
+  </div>
+
+  <div id="sim-modal" class="modal-overlay">
+    <div class="modal-content" style="max-width: 480px;">
+      <div class="modal-header">
+        <h2>🧪 Select Job Alert Source to Simulate</h2>
+        <button class="close-btn" onclick="closeSimModal()">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p style="font-size: 0.88rem; color: var(--text-muted);">
+          Choose a simulated multi-job email digest to test the extraction and dashboard:
+        </p>
+        <div style="display: flex; flex-direction: column; gap: 10px;">
+          <button class="btn btn-secondary" style="justify-content: flex-start;" onclick="simulateSpecificJob('LinkedIn')">
+            <span class="badge-platform LinkedIn">LinkedIn</span>
+            <span>Simulate LinkedIn Job Digest (3 roles)</span>
+          </button>
+          <button class="btn btn-secondary" style="justify-content: flex-start;" onclick="simulateSpecificJob('Naukri')">
+            <span class="badge-platform Naukri">Naukri</span>
+            <span>Simulate Naukri FastForward Alert (3 roles)</span>
+          </button>
+          <button class="btn btn-secondary" style="justify-content: flex-start;" onclick="simulateSpecificJob('Indeed')">
+            <span class="badge-platform Indeed">Indeed</span>
+            <span>Simulate Indeed Job Alerts (2 roles)</span>
+          </button>
+          <button class="btn btn-secondary" style="justify-content: flex-start;" onclick="simulateSpecificJob('Glassdoor')">
+            <span class="badge-platform Glassdoor">Glassdoor</span>
+            <span>Simulate Glassdoor Recommendations (2 roles)</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="job-modal" class="modal-overlay">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2 id="modal-job-title">Job Details</h2>
+        <button class="close-btn" onclick="closeJobModal()">&times;</button>
+      </div>
+      <div class="modal-body" id="modal-job-body"></div>
+    </div>
+  </div>
+
+  <div id="settings-modal" class="modal-overlay">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2>⚙️ System & Email Settings</h2>
+        <button class="close-btn" onclick="closeSettingsModal()">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label>Target Email Address</label>
+          <input type="email" id="set-target-email" value="deepak.gvit@gmail.com">
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label>Check Interval (Minutes)</label>
+            <input type="number" id="set-check-interval" min="1" max="120" value="15">
+          </div>
+          <div class="form-group">
+            <label>Email Fetch Mode</label>
+            <select id="set-auth-mode" onchange="toggleAuthFields(this.value)">
+              <option value="simulator">🧪 Simulator Mode (Testing with sample streams)</option>
+              <option value="imap">🔒 Gmail IMAP (App Password - Recommended)</option>
+              <option value="oauth">🔑 Gmail API OAuth2 (credentials.json)</option>
+            </select>
+          </div>
+        </div>
+        <div id="imap-credentials-box" class="form-group" style="display:none;">
+          <label>Gmail App Password (16 characters)</label>
+          <input type="password" id="set-imap-password" placeholder="e.g. abcd efgh ijkl mnop">
+        </div>
+        <div class="form-group">
+          <label>Gemini API Key</label>
+          <input type="password" id="set-gemini-key" placeholder="AIzaSy...">
+        </div>
+        <div class="form-group">
+          <label>Mobile Push Notification Topic (ntfy.sh)</label>
+          <input type="text" id="set-ntfy-topic" value="deepak-job-hunter-alerts">
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label>Desktop Toast Notifications</label>
+            <select id="set-desktop-notify">
+              <option value="true">Enabled</option>
+              <option value="false">Disabled</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Mobile Push Notifications</label>
+            <select id="set-mobile-notify">
+              <option value="true">Enabled</option>
+              <option value="false">Disabled</option>
+            </select>
+          </div>
+        </div>
+        <div style="display: flex; justify-content: space-between; gap: 12px; margin-top: 10px;">
+          <button class="btn btn-secondary" onclick="testNotifications()">🔔 Test Notifications</button>
+          <button class="btn btn-primary" onclick="saveSettings()">💾 Save Settings</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="mobile-modal" class="modal-overlay">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2>📱 Connect Mobile Notifications</h2>
+        <button class="close-btn" onclick="closeMobileModal()">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p style="color: var(--text-muted); font-size: 0.9rem;">
+          Access your live dashboard and receive push notifications directly on your phone:
+        </p>
+        <div class="qr-box">
+          <img id="qr-code-img" src="" alt="Scan QR Code" width="180" height="180">
+          <div style="font-size: 0.85rem;">
+            <strong>Open Dashboard on mobile:</strong><br>
+            <a id="public-dashboard-direct-link" href="#" target="_blank" style="color: #6ee7b7; text-decoration: underline; font-family: var(--font-mono); font-size: 0.82rem;">Loading...</a>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="logs-modal" class="modal-overlay">
+    <div class="modal-content" style="max-width: 800px;">
+      <div class="modal-header">
+        <h2>📋 Email Check Audit & 15m History</h2>
+        <button class="close-btn" onclick="closeLogsModal()">&times;</button>
+      </div>
+      <div class="modal-body" id="logs-body">
+        <p>Loading history logs...</p>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast-container"></div>
+  <script src="js/app.js"></script>
+</body>
+</html>

@@ -5,6 +5,7 @@ import logging
 import random
 import os
 import json
+import urllib.parse
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
 from config import IMAP_SERVER, IMAP_PORT, GMAIL_CREDENTIALS_FILE, GMAIL_TOKEN_FILE
@@ -13,7 +14,21 @@ from database import get_setting
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Realistic Job Alert Templates for LinkedIn, Naukri, Indeed, Glassdoor & Direct Recruiters
+def generate_working_apply_url(job_title: str, company_name: str, platform: str = "Direct") -> str:
+    """Generates a guaranteed working, live search/apply URL for any role and company."""
+    query = urllib.parse.quote(f"{job_title} {company_name}")
+    p_low = platform.lower()
+    if "indeed" in p_low:
+        return f"https://www.indeed.com/jobs?q={query}"
+    elif "linkedin" in p_low:
+        return f"https://www.linkedin.com/jobs/search/?keywords={query}"
+    elif "naukri" in p_low:
+        return f"https://www.naukri.com/jobs-in-india?keywords={query}"
+    elif "glassdoor" in p_low:
+        return f"https://www.glassdoor.com/Job/jobs.htm?sc.keyword={query}"
+    return f"https://www.google.com/search?q=Apply+{query}+Careers"
+
+# Realistic Multi-Job Alert Templates with 100% Working Live Links
 MULTI_JOB_SIMULATOR_TEMPLATES = [
     {
         "source": "LinkedIn",
@@ -23,21 +38,21 @@ MULTI_JOB_SIMULATOR_TEMPLATES = [
 
 1. Senior Python / AI Architect at ScaleAI
 Location: Remote (Global)
-Link: https://www.linkedin.com/jobs/view/scaleai-senior-python-architect-991201
+Apply: https://www.linkedin.com/jobs/search/?keywords=Senior+Python+AI+Architect+ScaleAI
 Skills: Python, FastAPI, PyTorch, LLMs, Docker
 
 2. Lead Backend Engineer at Uber
 Location: Bengaluru, Karnataka, India
-Link: https://www.linkedin.com/jobs/view/uber-lead-backend-engineer-882319
+Apply: https://www.linkedin.com/jobs/search/?keywords=Lead+Backend+Engineer+Uber+Bengaluru
 Skills: Python, Go, High Scale Distributed Systems, Kafka
 
 3. Machine Learning Platform Lead at Databricks
 Location: Remote / Hybrid
-Link: https://www.linkedin.com/jobs/view/databricks-ml-platform-lead-771234
+Apply: https://www.linkedin.com/jobs/search/?keywords=Machine+Learning+Platform+Lead+Databricks
 Skills: Python, Spark, MLflow, Kubernetes, Cloud AI
 
-Click on any job above to apply directly with 1-click apply on LinkedIn.""",
-        "html_body": "<div><h2>LinkedIn Job Alerts</h2><a href='https://www.linkedin.com/jobs/view/scaleai-senior-python-architect-991201'>1. Senior Python / AI Architect at ScaleAI</a><br><a href='https://www.linkedin.com/jobs/view/uber-lead-backend-engineer-882319'>2. Lead Backend Engineer at Uber</a><br><a href='https://www.linkedin.com/jobs/view/databricks-ml-platform-lead-771234'>3. Machine Learning Platform Lead at Databricks</a></div>"
+Click on any job above to apply directly on LinkedIn.""",
+        "html_body": "<div><h2>LinkedIn Job Alerts</h2><a href='https://www.linkedin.com/jobs/search/?keywords=Senior+Python+AI+Architect+ScaleAI'>1. Senior Python / AI Architect at ScaleAI</a><br><a href='https://www.linkedin.com/jobs/search/?keywords=Lead+Backend+Engineer+Uber+Bengaluru'>2. Lead Backend Engineer at Uber</a><br><a href='https://www.linkedin.com/jobs/search/?keywords=Machine+Learning+Platform+Lead+Databricks'>3. Machine Learning Platform Lead at Databricks</a></div>"
     },
     {
         "source": "Naukri",
@@ -51,23 +66,23 @@ Matching jobs for your profile on Naukri.com:
 Company: Swiggy
 Location: Bengaluru
 Exp: 8-12 yrs | Salary: ₹55 - ₹75 LPA
-Apply: https://www.naukri.com/job-listings-swiggy-principal-ai-engineer-10101
+Apply: https://www.naukri.com/jobs-in-india?keywords=Principal+AI+Engineer+Swiggy
 
 2. Staff Python Developer at Flipkart
 Company: Flipkart
 Location: Bengaluru / Remote
 Exp: 6-10 yrs | Salary: ₹45 - ₹60 LPA
-Apply: https://www.naukri.com/job-listings-flipkart-staff-python-dev-20202
+Apply: https://www.naukri.com/jobs-in-india?keywords=Staff+Python+Developer+Flipkart
 
 3. Technical Lead - Data & AI at Infosys
 Company: Infosys
 Location: Hyderabad / Pune
 Exp: 7-11 yrs | Salary: ₹32 - ₹45 LPA
-Apply: https://www.naukri.com/job-listings-infosys-tech-lead-ai-30303
+Apply: https://www.naukri.com/jobs-in-india?keywords=Technical+Lead+AI+Infosys
 
 Regards,
 Naukri Jobseeker Services""",
-        "html_body": "<div><h2>Naukri FastForward Alerts</h2><a href='https://www.naukri.com/job-listings-swiggy-principal-ai-engineer-10101'>Swiggy - Principal AI Engineer</a><a href='https://www.naukri.com/job-listings-flipkart-staff-python-dev-20202'>Flipkart - Staff Python Dev</a></div>"
+        "html_body": "<div><h2>Naukri FastForward Alerts</h2><a href='https://www.naukri.com/jobs-in-india?keywords=Principal+AI+Engineer+Swiggy'>Swiggy - Principal AI Engineer</a><a href='https://www.naukri.com/jobs-in-india?keywords=Staff+Python+Developer+Flipkart'>Flipkart - Staff Python Dev</a></div>"
     },
     {
         "source": "Indeed",
@@ -78,15 +93,15 @@ Naukri Jobseeker Services""",
 1. Senior Cloud Backend Engineer - Stripe
 Location: Remote
 Salary: $170,000 - $215,000 a year
-View and Apply: https://www.indeed.com/viewjob?jk=stripe-cloud-backend-991
+View and Apply: https://www.indeed.com/jobs?q=Senior+Cloud+Backend+Engineer+Stripe
 
 2. Full Stack AI Engineer - Anthropic
 Location: San Francisco, CA / Remote
 Salary: $200,000 - $260,000 a year
-View and Apply: https://www.indeed.com/viewjob?jk=anthropic-ai-engineer-882
+View and Apply: https://www.indeed.com/jobs?q=Full+Stack+AI+Engineer+Anthropic
 
 Easily apply with your Indeed resume.""",
-        "html_body": "<div><h2>Indeed Alerts</h2><a href='https://www.indeed.com/viewjob?jk=stripe-cloud-backend-991'>Senior Cloud Backend Engineer - Stripe</a></div>"
+        "html_body": "<div><h2>Indeed Alerts</h2><a href='https://www.indeed.com/jobs?q=Senior+Cloud+Backend+Engineer+Stripe'>Senior Cloud Backend Engineer - Stripe</a></div>"
     },
     {
         "source": "Glassdoor",
@@ -97,15 +112,15 @@ Easily apply with your Indeed resume.""",
 1. Lead Software Engineer at Razorpay
 Rating: 4.4 ★ | Location: Bengaluru
 Estimated Salary: ₹40L - ₹55L
-Apply: https://www.glassdoor.com/job-listing/razorpay-lead-software-engineer-1122
+Apply: https://www.glassdoor.com/Job/jobs.htm?sc.keyword=Lead+Software+Engineer+Razorpay
 
 2. Principal Architect at Atlassian
 Rating: 4.6 ★ | Location: Remote (India)
 Estimated Salary: ₹60L - ₹80L
-Apply: https://www.glassdoor.com/job-listing/atlassian-principal-architect-3344
+Apply: https://www.glassdoor.com/Job/jobs.htm?sc.keyword=Principal+Architect+Atlassian
 
 Visit Glassdoor for company reviews and salary insights.""",
-        "html_body": "<div><h2>Glassdoor Jobs</h2><a href='https://www.glassdoor.com/job-listing/razorpay-lead-software-engineer-1122'>Lead Software Engineer at Razorpay</a></div>"
+        "html_body": "<div><h2>Glassdoor Jobs</h2><a href='https://www.glassdoor.com/Job/jobs.htm?sc.keyword=Lead+Software+Engineer+Razorpay'>Lead Software Engineer at Razorpay</a></div>"
     }
 ]
 
@@ -114,14 +129,6 @@ class EmailService:
         pass
 
     def fetch_recent_emails(self) -> List[Dict[str, Any]]:
-        """
-        Fetches new/recent emails including targeted search on:
-        - LinkedIn (jobalerts-noreply@linkedin.com)
-        - Indeed (donotreply@jobalert.indeed.com)
-        - Naukri (*@naukri.com)
-        - Glassdoor (noreply@glassdoor.com)
-        - General INBOX unread emails
-        """
         auth_mode = get_setting("auth_mode", "simulator").lower()
         target_email = get_setting("target_email", "deepak.gvit@gmail.com")
 
@@ -148,7 +155,6 @@ class EmailService:
             mail.login(email_address, clean_pw)
             mail.select("INBOX")
 
-            # Collect IDs from unread + specific job board senders
             search_queries = [
                 'UNSEEN',
                 '(FROM "jobalerts-noreply@linkedin.com")',
@@ -162,7 +168,6 @@ class EmailService:
                 status, messages = mail.search(None, sq)
                 if status == 'OK' and messages[0]:
                     ids = messages[0].split()
-                    # Take latest 10 from each category
                     for i in ids[-10:]:
                         all_msg_ids.add(i)
 
@@ -190,7 +195,6 @@ class EmailService:
                         date_received = msg.get("Date", datetime.now().isoformat())
                         message_id = msg.get("Message-ID", f"imap_{msg_id.decode()}_{datetime.now().timestamp()}")
 
-                        # Extract text and html
                         body = ""
                         html_body = ""
                         if msg.is_multipart():
@@ -228,7 +232,6 @@ class EmailService:
             return []
 
     def _fetch_via_oauth(self, target_email: str) -> List[Dict[str, Any]]:
-        """Fetches emails using official Google Gmail API client."""
         try:
             if not os.path.exists(GMAIL_CREDENTIALS_FILE) and not os.path.exists(GMAIL_TOKEN_FILE):
                 return []
@@ -239,7 +242,6 @@ class EmailService:
             creds = Credentials.from_authorized_user_file(str(GMAIL_TOKEN_FILE), ["https://www.googleapis.com/auth/gmail.readonly"])
             service = build('gmail', 'v1', credentials=creds)
 
-            # Targeted query
             query = "is:unread OR from:linkedin.com OR from:naukri.com OR from:indeed.com OR from:glassdoor.com"
             results = service.users().messages().list(userId='me', maxResults=10, q=query).execute()
             messages = results.get('messages', [])
@@ -266,7 +268,6 @@ class EmailService:
             return []
 
     def _fetch_simulated_emails(self) -> List[Dict[str, Any]]:
-        """Generates realistic sample multi-job email digests from LinkedIn, Naukri, Indeed, Glassdoor."""
         chosen = random.sample(MULTI_JOB_SIMULATOR_TEMPLATES, random.randint(1, 2))
         results = []
         for item in chosen:
@@ -283,7 +284,6 @@ class EmailService:
         return results
 
     def create_single_simulated_job_email(self, platform_source: Optional[str] = None) -> Dict[str, Any]:
-        """Creates a single specific simulated digest email for manual UI testing."""
         if platform_source:
             matches = [t for t in MULTI_JOB_SIMULATOR_TEMPLATES if t["source"].lower() == platform_source.lower()]
             item = matches[0] if matches else random.choice(MULTI_JOB_SIMULATOR_TEMPLATES)

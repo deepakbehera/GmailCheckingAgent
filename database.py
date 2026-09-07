@@ -1,5 +1,6 @@
 import sqlite3
 import json
+import urllib.parse
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 from config import DB_PATH, DEFAULT_TARGET_EMAIL, DEFAULT_CHECK_INTERVAL_MINS, DEFAULT_NTFY_TOPIC, DEFAULT_DESKTOP_NOTIFY, DEFAULT_MOBILE_NOTIFY, DEFAULT_AUTH_MODE
@@ -13,7 +14,7 @@ def init_db():
     conn = get_db()
     cursor = conn.cursor()
 
-    # Jobs Table with source_platform
+    # Jobs Table
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS jobs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -49,7 +50,20 @@ def init_db():
     try:
         cursor.execute("ALTER TABLE jobs ADD COLUMN source_platform TEXT DEFAULT 'Direct'")
     except sqlite3.OperationalError:
-        pass # already exists
+        pass
+
+    # Migration: clean up any broken simulator URLs from earlier runs
+    cursor.execute("""
+    UPDATE jobs 
+    SET apply_url = 'https://www.indeed.com/jobs?q=' || replace(job_title, ' ', '+') || '+' || replace(company_name, ' ', '+')
+    WHERE apply_url LIKE '%jk=stripe-cloud-backend%' OR apply_url LIKE '%jk=anthropic-ai%'
+    """)
+
+    # Migration: infer source_platform from sender if NULL or Direct
+    cursor.execute("UPDATE jobs SET source_platform = 'LinkedIn' WHERE (source_platform IS NULL OR source_platform = 'Direct') AND LOWER(email_sender) LIKE '%linkedin%'")
+    cursor.execute("UPDATE jobs SET source_platform = 'Naukri' WHERE (source_platform IS NULL OR source_platform = 'Direct') AND LOWER(email_sender) LIKE '%naukri%'")
+    cursor.execute("UPDATE jobs SET source_platform = 'Indeed' WHERE (source_platform IS NULL OR source_platform = 'Direct') AND LOWER(email_sender) LIKE '%indeed%'")
+    cursor.execute("UPDATE jobs SET source_platform = 'Glassdoor' WHERE (source_platform IS NULL OR source_platform = 'Direct') AND LOWER(email_sender) LIKE '%glassdoor%'")
 
     # Email Checks Audit Log
     cursor.execute("""
@@ -66,11 +80,6 @@ def init_db():
         created_at TEXT DEFAULT CURRENT_TIMESTAMP
     );
     """)
-
-    try:
-        cursor.execute("ALTER TABLE email_logs ADD COLUMN jobs_extracted_count INTEGER DEFAULT 0")
-    except sqlite3.OperationalError:
-        pass
 
     # 15-minute Periodic Check Run History
     cursor.execute("""
@@ -122,16 +131,20 @@ def get_all_jobs(status_filter: Optional[str] = None, platform_filter: Optional[
     query = "SELECT * FROM jobs WHERE 1=1"
     params = []
 
-    if status_filter and status_filter != "ALL":
+    if status_filter and status_filter.upper() != "ALL":
         query += " AND status = ?"
-        params.append(status_filter)
+        params.append(status_filter.upper())
 
-    if platform_filter and platform_filter != "ALL":
-        query += " AND LOWER(source_platform) = LOWER(?)"
-        params.append(platform_filter)
+    if platform_filter and platform_filter.upper() != "ALL":
+        p_clean = platform_filter.strip().lower()
+        if p_clean == "direct":
+            query += " AND (LOWER(COALESCE(source_platform, 'direct')) = 'direct' OR source_platform IS NULL OR source_platform = '' OR (LOWER(source_platform) NOT LIKE '%linkedin%' AND LOWER(source_platform) NOT LIKE '%naukri%' AND LOWER(source_platform) NOT LIKE '%indeed%' AND LOWER(source_platform) NOT LIKE '%glassdoor%'))"
+        else:
+            query += " AND (LOWER(COALESCE(source_platform, '')) LIKE ? OR LOWER(COALESCE(email_sender, '')) LIKE ? OR LOWER(COALESCE(email_subject, '')) LIKE ?)"
+            params.extend([f"%{p_clean}%", f"%{p_clean}%", f"%{p_clean}%"])
 
-    if search_query:
-        search = f"%{search_query}%"
+    if search_query and search_query.strip():
+        search = f"%{search_query.strip()}%"
         query += " AND (job_title LIKE ? OR company_name LIKE ? OR location LIKE ? OR skills LIKE ? OR summary LIKE ? OR source_platform LIKE ?)"
         params.extend([search, search, search, search, search, search])
 
@@ -235,8 +248,6 @@ def delete_job(job_id: int) -> bool:
     conn.close()
     return success
 
-# --- Check History & Audit Logs ---
-
 def log_email_inspection(message_id: str, sender: str, subject: str, date_received: str, is_job: bool, summary: str, count: int = 0):
     conn = get_db()
     cursor = conn.cursor()
@@ -287,8 +298,6 @@ def is_message_already_processed(message_id: str) -> bool:
     conn.close()
     return row is not None
 
-# --- Company & Application History Matching ---
-
 def find_previous_applications_for_company(company_name: str, exclude_id: Optional[int] = None) -> List[Dict[str, Any]]:
     if not company_name:
         return []
@@ -309,8 +318,6 @@ def find_previous_applications_for_company(company_name: str, exclude_id: Option
     rows = cursor.fetchall()
     conn.close()
     return [dict(row) for row in rows]
-
-# --- Settings Store ---
 
 def get_all_settings() -> Dict[str, str]:
     conn = get_db()
@@ -360,7 +367,6 @@ def get_dashboard_stats() -> Dict[str, Any]:
     cursor.execute("SELECT COUNT(*) FROM email_logs")
     total_emails_scanned = cursor.fetchone()[0]
 
-    # Platform counts
     cursor.execute("SELECT source_platform, COUNT(*) as cnt FROM jobs GROUP BY source_platform")
     platform_rows = cursor.fetchall()
     platform_counts = {row["source_platform"]: row["cnt"] for row in platform_rows}
