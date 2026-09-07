@@ -1,0 +1,664 @@
+// AI Gmail Job Hunter Frontend Application Logic
+
+let allJobs = [];
+let currentFilter = 'ALL';
+let currentPlatform = 'ALL';
+let searchQuery = '';
+let nextCheckTime = null;
+let countdownInterval = null;
+let currentSettings = {};
+let currentPublicUrl = '';
+
+// Initialize on page load
+document.addEventListener('DOMContentLoaded', () => {
+  initApp();
+  setupSSE();
+});
+
+async function initApp() {
+  await loadSettings();
+  await loadStats();
+  await loadJobs();
+  startLocalCountdown();
+}
+
+// --- REST API Calls ---
+
+async function loadJobs() {
+  try {
+    let url = `/api/jobs?status=${currentFilter}`;
+    if (currentPlatform !== 'ALL') {
+      url += `&platform=${encodeURIComponent(currentPlatform)}`;
+    }
+    if (searchQuery.trim()) {
+      url += `&q=${encodeURIComponent(searchQuery.trim())}`;
+    }
+    const res = await fetch(url);
+    const data = await res.json();
+    if (data.status === 'success') {
+      allJobs = data.jobs;
+      renderJobs(allJobs);
+    }
+  } catch (err) {
+    console.error('Failed to load jobs:', err);
+    showToast('❌ Error loading jobs from server', 'error');
+  }
+}
+
+async function loadStats() {
+  try {
+    const res = await fetch('/api/stats');
+    const data = await res.json();
+    if (data.status === 'success') {
+      const stats = data.stats;
+      document.getElementById('stat-total-jobs').innerText = stats.total_jobs || 0;
+      document.getElementById('stat-new-jobs').innerText = stats.new_jobs || 0;
+      document.getElementById('stat-applied-jobs').innerText = stats.applied_jobs || 0;
+      document.getElementById('stat-repeat-companies').innerText = stats.repeat_companies || 0;
+      
+      if (stats.target_email) {
+        document.getElementById('header-target-email').innerText = stats.target_email;
+      }
+
+      if (stats.public_url) {
+        currentPublicUrl = stats.public_url;
+        document.getElementById('display-public-url').innerText = stats.public_url;
+        document.getElementById('display-public-url').style.color = '#34d399';
+      } else {
+        document.getElementById('display-public-url').innerText = 'Initializing public HTTPS tunnel...';
+      }
+
+      if (stats.last_checked_at) {
+        const d = new Date(stats.last_checked_at);
+        document.getElementById('last-check-text').innerText = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      } else {
+        document.getElementById('last-check-text').innerText = 'Pending initial cycle';
+      }
+
+      if (stats.next_check_at) {
+        nextCheckTime = new Date(stats.next_check_at).getTime();
+      } else {
+        const intervalMins = parseInt(stats.check_interval_mins || '15', 10);
+        nextCheckTime = Date.now() + intervalMins * 60 * 1000;
+      }
+    }
+  } catch (err) {
+    console.error('Failed to load stats:', err);
+  }
+}
+
+async function loadSettings() {
+  try {
+    const res = await fetch('/api/settings');
+    const data = await res.json();
+    if (data.status === 'success') {
+      currentSettings = data.settings;
+      document.getElementById('set-target-email').value = currentSettings.target_email || 'deepak.gvit@gmail.com';
+      document.getElementById('set-check-interval').value = currentSettings.check_interval_mins || '15';
+      document.getElementById('set-auth-mode').value = currentSettings.auth_mode || 'simulator';
+      document.getElementById('set-gemini-key').value = currentSettings.gemini_api_key || '';
+      document.getElementById('set-ntfy-topic').value = currentSettings.ntfy_topic || 'deepak-job-hunter-alerts';
+      document.getElementById('set-desktop-notify').value = currentSettings.desktop_notify || 'true';
+      document.getElementById('set-mobile-notify').value = currentSettings.mobile_notify || 'true';
+      
+      toggleAuthFields(currentSettings.auth_mode || 'simulator');
+    }
+  } catch (err) {
+    console.error('Failed to load settings:', err);
+  }
+}
+
+// --- Real-Time Server-Sent Events (SSE) ---
+
+function setupSSE() {
+  try {
+    const eventSource = new EventSource('/api/events');
+
+    eventSource.onopen = () => {
+      document.getElementById('live-connection-status').innerText = 'Live Feed Connected';
+    };
+
+    eventSource.onmessage = (e) => {
+      try {
+        const payload = JSON.parse(e.data);
+        if (payload.type === 'CHECK_COMPLETED') {
+          showToast(`📬 Checked Gmail: ${payload.data.new_jobs_found} new job(s) found!`, 'info');
+          loadStats();
+          loadJobs();
+          if (payload.data.next_check_at) {
+            nextCheckTime = new Date(payload.data.next_check_at).getTime();
+          }
+        } else if (payload.type === 'NEW_JOB_RECEIVED') {
+          showToast(`🎯 New Job Opportunity: ${payload.data.job.job_title}`, 'success');
+          loadStats();
+          loadJobs();
+        } else if (payload.type === 'JOB_STATUS_UPDATED') {
+          loadStats();
+          loadJobs();
+        }
+      } catch (parseErr) {
+        // keepalive or non-json message
+      }
+    };
+
+    eventSource.onerror = () => {
+      document.getElementById('live-connection-status').innerText = 'Polling (15m Interval)';
+    };
+  } catch (err) {
+    console.log('SSE failed to connect:', err);
+  }
+}
+
+// --- 15-Minute Countdown Timer ---
+
+function startLocalCountdown() {
+  if (countdownInterval) clearInterval(countdownInterval);
+
+  countdownInterval = setInterval(() => {
+    if (!nextCheckTime) {
+      nextCheckTime = Date.now() + 15 * 60 * 1000;
+    }
+
+    const now = Date.now();
+    const diff = nextCheckTime - now;
+
+    if (diff <= 0) {
+      document.getElementById('countdown-timer').innerText = '00:00';
+      loadStats();
+      loadJobs();
+      const intervalMins = parseInt(currentSettings.check_interval_mins || '15', 10);
+      nextCheckTime = Date.now() + intervalMins * 60 * 1000;
+      return;
+    }
+
+    const mins = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
+    const secs = Math.floor((diff % (1000 * 60)) / 1000);
+
+    const formatted = `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+    document.getElementById('countdown-timer').innerText = formatted;
+  }, 1000);
+}
+
+// --- Render Job Cards & Applied State ---
+
+function renderJobs(jobs) {
+  const container = document.getElementById('job-feed-container');
+  if (!jobs || jobs.length === 0) {
+    container.innerHTML = `
+      <div class="empty-state">
+        <div class="empty-icon">📭</div>
+        <h3>No Job Postings Found</h3>
+        <p>No jobs matching the current filter. Use "Check Gmail Now" or "Simulate Job Alerts" to scan for openings.</p>
+        <button class="btn btn-primary" onclick="openSimulateMenu()">🧪 Simulate Job Alerts</button>
+      </div>
+    `;
+    return;
+  }
+
+  let html = '';
+  jobs.forEach(job => {
+    const isApplied = job.status === 'APPLIED';
+    const appliedClass = isApplied ? 'is-applied' : '';
+    const platform = job.source_platform || 'Direct';
+    
+    // Skills tags
+    let skillsList = [];
+    if (job.skills) {
+      try {
+        skillsList = typeof job.skills === 'string' && job.skills.startsWith('[') ? JSON.parse(job.skills) : job.skills.split(',');
+      } catch (e) {
+        skillsList = [job.skills];
+      }
+    }
+
+    const skillsHtml = skillsList.slice(0, 5).map(s => `<span class="skill-tag">${escapeHtml(s.trim())}</span>`).join('');
+
+    // Previous Application Warning Pill
+    let repeatCompanyBanner = '';
+    if (job.applied_earlier) {
+      repeatCompanyBanner = `
+        <div class="repeat-company-banner">
+          <span>⚠️ <strong>Previous Application Detected:</strong> You previously applied to ${escapeHtml(job.company_name)} ${job.previous_applied_date ? 'on ' + escapeHtml(job.previous_applied_date) : ''} for '${escapeHtml(job.previous_job_title || 'Role')}'.</span>
+        </div>
+      `;
+    }
+
+    // Applied Red Badge
+    let appliedBadge = '';
+    if (isApplied) {
+      const appliedDate = job.applied_at ? new Date(job.applied_at).toLocaleDateString() : 'Done';
+      appliedBadge = `<span class="badge-applied-red">● ALREADY APPLIED (${appliedDate})</span>`;
+    }
+
+    // Platform Badge
+    const platformBadge = `<span class="badge-platform ${platform}">${platform}</span>`;
+
+    // Apply Button
+    const applyButton = job.apply_url ? `
+      <a href="${escapeHtml(job.apply_url)}" target="_blank" rel="noopener noreferrer" class="btn btn-apply">
+        <span>Apply Online ↗</span>
+      </a>
+    ` : '';
+
+    // Applied Toggle Button
+    const appliedToggleBtn = isApplied ? `
+      <button class="btn btn-applied-toggle btn-applied-active" onclick="toggleAppliedStatus(${job.id}, 'APPLIED')" title="Click to unmark as applied">
+        <span>✓ Already Applied (Done)</span>
+      </button>
+    ` : `
+      <button class="btn btn-applied-toggle" onclick="toggleAppliedStatus(${job.id}, 'NEW')" title="Mark as applied (strike through & red marker)">
+        <span>Mark as Applied</span>
+      </button>
+    `;
+
+    html += `
+      <div class="job-card ${appliedClass}" id="job-card-${job.id}">
+        <div class="job-card-header">
+          <div class="job-title-group">
+            <h2 class="job-title-text">${escapeHtml(job.job_title)}</h2>
+            <div class="job-company-meta">
+              ${platformBadge}
+              <span class="company-pill">${escapeHtml(job.company_name)}</span>
+              <span>•</span>
+              <span class="badge badge-remote">${escapeHtml(job.location || 'Remote')}</span>
+              ${job.salary && job.salary !== 'Not specified' ? `<span class="badge badge-salary">${escapeHtml(job.salary)}</span>` : ''}
+              ${job.match_score ? `<span class="badge badge-match">${job.match_score}% Match</span>` : ''}
+              ${appliedBadge}
+            </div>
+          </div>
+        </div>
+
+        ${repeatCompanyBanner}
+
+        <p class="job-summary-text" style="color: var(--text-muted); font-size: 0.92rem; line-height: 1.5;">
+          ${escapeHtml(job.summary || 'Job opportunity extracted from email.')}
+        </p>
+
+        ${skillsHtml ? `<div class="skills-container">${skillsHtml}</div>` : ''}
+
+        <div class="job-card-footer">
+          <div class="date-received">
+            <span>Received: ${escapeHtml(job.date_received || 'Recently')}</span>
+          </div>
+          <div class="action-buttons">
+            <button class="btn btn-secondary" style="font-size: 0.82rem; padding: 6px 12px;" onclick="viewJobDetails(${job.id})">
+              <span>🔍 Details</span>
+            </button>
+            ${appliedToggleBtn}
+            ${applyButton}
+          </div>
+        </div>
+      </div>
+    `;
+  });
+
+  container.innerHTML = html;
+}
+
+// --- Toggle Applied Status (Strike & Red Marker) ---
+
+async function toggleAppliedStatus(jobId, currentStatus) {
+  const newStatus = currentStatus === 'APPLIED' ? 'NEW' : 'APPLIED';
+  try {
+    const res = await fetch(`/api/jobs/${jobId}/status`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: newStatus })
+    });
+    const data = await res.json();
+    if (data.status === 'success') {
+      if (newStatus === 'APPLIED') {
+        showToast('🎯 Marked as Applied! Struck through and highlighted in red.', 'success');
+      } else {
+        showToast('🔄 Status reverted to Open Role.', 'info');
+      }
+      await loadStats();
+      await loadJobs();
+    }
+  } catch (err) {
+    console.error('Error updating job status:', err);
+    showToast('Failed to update status', 'error');
+  }
+}
+
+// --- Trigger Manual Check & Simulation ---
+
+async function triggerCheckNow() {
+  const btn = document.getElementById('btn-check-now');
+  const originalText = btn.innerHTML;
+  btn.innerHTML = '<span>⏳ Checking Gmail...</span>';
+  btn.disabled = true;
+
+  try {
+    const res = await fetch('/api/check-now', { method: 'POST' });
+    const data = await res.json();
+    showToast(`✅ ${data.message || 'Email check cycle complete!'}`, 'success');
+    await loadStats();
+    await loadJobs();
+  } catch (err) {
+    console.error('Error checking emails:', err);
+    showToast('Check failed. Verify network or credentials.', 'error');
+  } finally {
+    btn.innerHTML = originalText;
+    btn.disabled = false;
+  }
+}
+
+function openSimulateMenu() {
+  document.getElementById('sim-modal').classList.add('active');
+}
+
+function closeSimModal() {
+  document.getElementById('sim-modal').classList.remove('active');
+}
+
+async function simulateSpecificJob(source) {
+  closeSimModal();
+  showToast(`🧪 Injecting simulated ${source} multi-job digest...`, 'info');
+
+  try {
+    const res = await fetch(`/api/simulate-job?source=${encodeURIComponent(source)}`, { method: 'POST' });
+    const data = await res.json();
+    if (data.status === 'success') {
+      showToast(`✨ ${data.message}`, 'success');
+      await loadStats();
+      await loadJobs();
+    }
+  } catch (err) {
+    console.error('Error simulating job:', err);
+    showToast('Simulation error', 'error');
+  }
+}
+
+// --- Filters and Search ---
+
+function setFilter(status, el) {
+  currentFilter = status;
+  document.querySelectorAll('.filter-tab').forEach(t => t.classList.remove('active', 'active-applied'));
+  if (status === 'APPLIED') {
+    el.classList.add('active', 'active-applied');
+  } else {
+    el.classList.add('active');
+  }
+  loadJobs();
+}
+
+function setPlatformFilter(platform, el) {
+  currentPlatform = platform;
+  document.querySelectorAll('.platform-tab').forEach(t => t.classList.remove('active'));
+  el.classList.add('active');
+  loadJobs();
+}
+
+let searchDebounce = null;
+function handleSearch(val) {
+  clearTimeout(searchDebounce);
+  searchDebounce = setTimeout(() => {
+    searchQuery = val;
+    loadJobs();
+  }, 250);
+}
+
+// --- Modals ---
+
+async function viewJobDetails(jobId) {
+  try {
+    const res = await fetch(`/api/jobs/${jobId}`);
+    const data = await res.json();
+    if (data.status === 'success') {
+      const job = data.job;
+      const history = data.company_history || [];
+
+      document.getElementById('modal-job-title').innerText = job.job_title;
+
+      let historyHtml = '';
+      if (history.length > 0) {
+        historyHtml = `
+          <div style="background: rgba(245, 158, 11, 0.1); border: 1px solid rgba(245, 158, 11, 0.3); padding: 14px; border-radius: 8px; margin-top: 14px;">
+            <strong style="color: #fde68a;">🏢 Past History with ${escapeHtml(job.company_name)}:</strong>
+            <ul style="margin-top: 8px; padding-left: 20px; font-size: 0.85rem; color: var(--text-muted);">
+              ${history.map(h => `<li>Applied on ${h.applied_at || h.created_at} for '${escapeHtml(h.job_title)}' (${h.status})</li>`).join('')}
+            </ul>
+          </div>
+        `;
+      }
+
+      document.getElementById('modal-job-body').innerHTML = `
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+          <h3 style="color: #c7d2fe;">${escapeHtml(job.company_name)}</h3>
+          <span class="badge badge-remote">${escapeHtml(job.location || 'Remote')}</span>
+        </div>
+        <div style="font-size: 0.85rem; color: var(--text-dim); margin-bottom: 12px;">
+          Source: <strong style="color:#a5b4fc;">${escapeHtml(job.source_platform || 'Direct')}</strong> | 
+          Sender: <code>${escapeHtml(job.email_sender || 'N/A')}</code><br>
+          Subject: <em>${escapeHtml(job.email_subject || 'N/A')}</em>
+        </div>
+
+        <div class="form-group">
+          <label>AI Analysis & Summary</label>
+          <p style="background: rgba(0,0,0,0.3); padding: 12px; border-radius: 8px; font-size: 0.9rem; color: #e0e7ff; line-height: 1.5;">
+            ${escapeHtml(job.summary || 'No summary available.')}
+          </p>
+        </div>
+
+        <div class="form-group">
+          <label>Email Snippet</label>
+          <pre style="background: rgba(0,0,0,0.4); padding: 12px; border-radius: 8px; font-size: 0.82rem; font-family: var(--font-mono); white-space: pre-wrap; color: var(--text-muted); max-height: 200px; overflow-y: auto;">
+${escapeHtml(job.raw_email_snippet || 'No email snippet available.')}
+          </pre>
+        </div>
+
+        ${historyHtml}
+
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 14px;">
+          ${job.apply_url ? `<a href="${escapeHtml(job.apply_url)}" target="_blank" class="btn btn-apply">Apply Online ↗</a>` : '<span></span>'}
+          <button class="btn btn-secondary" onclick="closeJobModal()">Close</button>
+        </div>
+      `;
+
+      document.getElementById('job-modal').classList.add('active');
+    }
+  } catch (err) {
+    console.error('Error opening job details:', err);
+  }
+}
+
+function closeJobModal() {
+  document.getElementById('job-modal').classList.remove('active');
+}
+
+function openSettingsModal() {
+  document.getElementById('settings-modal').classList.add('active');
+}
+
+function closeSettingsModal() {
+  document.getElementById('settings-modal').classList.remove('active');
+}
+
+function toggleAuthFields(mode) {
+  const imapBox = document.getElementById('imap-credentials-box');
+  if (mode === 'imap') {
+    imapBox.style.display = 'block';
+  } else {
+    imapBox.style.display = 'none';
+  }
+}
+
+async function saveSettings() {
+  const updates = {
+    target_email: document.getElementById('set-target-email').value.trim(),
+    check_interval_mins: document.getElementById('set-check-interval').value.trim(),
+    auth_mode: document.getElementById('set-auth-mode').value,
+    gemini_api_key: document.getElementById('set-gemini-key').value.trim(),
+    ntfy_topic: document.getElementById('set-ntfy-topic').value.trim(),
+    desktop_notify: document.getElementById('set-desktop-notify').value,
+    mobile_notify: document.getElementById('set-mobile-notify').value,
+  };
+
+  const imapPw = document.getElementById('set-imap-password').value.trim();
+  if (imapPw) {
+    updates.imap_password = imapPw;
+  }
+
+  try {
+    const res = await fetch('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(updates)
+    });
+    const data = await res.json();
+    if (data.status === 'success') {
+      showToast('⚙️ Settings saved successfully!', 'success');
+      closeSettingsModal();
+      await loadStats();
+    }
+  } catch (err) {
+    showToast('Failed to save settings', 'error');
+  }
+}
+
+function openMobileModal() {
+  const topic = (currentSettings.ntfy_topic || 'deepak-job-hunter-alerts').trim();
+  const effectiveUrl = currentPublicUrl || window.location.origin;
+  
+  // Use quickchart QR code generator for the dashboard public URL
+  const qrUrl = `https://quickchart.io/qr?text=${encodeURIComponent(effectiveUrl)}&size=200&dark=000000`;
+  document.getElementById('qr-code-img').src = qrUrl;
+  
+  const linkEl = document.getElementById('public-dashboard-direct-link');
+  linkEl.innerText = effectiveUrl;
+  linkEl.href = effectiveUrl;
+
+  document.getElementById('display-ntfy-topic').innerText = topic;
+  document.getElementById('mobile-modal').classList.add('active');
+}
+
+function closeMobileModal() {
+  document.getElementById('mobile-modal').classList.remove('active');
+}
+
+function copyPublicUrl() {
+  const url = currentPublicUrl || window.location.origin;
+  navigator.clipboard.writeText(url).then(() => {
+    showToast('📋 Public URL copied to clipboard!', 'success');
+  }).catch(() => {
+    prompt('Copy public URL:', url);
+  });
+}
+
+async function testNotifications() {
+  try {
+    showToast('🚀 Triggering test desktop and mobile push...', 'info');
+    const res = await fetch('/api/test-notification', { method: 'POST' });
+    const data = await res.json();
+    showToast(`🔔 Test fired! Public URL: ${data.public_url}`, 'success');
+  } catch (err) {
+    showToast('Notification test failed', 'error');
+  }
+}
+
+async function openLogsModal() {
+  document.getElementById('logs-modal').classList.add('active');
+  const body = document.getElementById('logs-body');
+  body.innerHTML = '<p>Loading logs...</p>';
+
+  try {
+    const [historyRes, logsRes] = await Promise.all([
+      fetch('/api/history'),
+      fetch('/api/logs')
+    ]);
+    const histData = await historyRes.json();
+    const logData = await logsRes.json();
+
+    let html = `
+      <h3 style="font-size: 1rem; margin-bottom: 8px; color: #a5b4fc;">Recent 15-Minute Check Cycles</h3>
+      <div style="max-height: 200px; overflow-y: auto; background: rgba(0,0,0,0.3); border-radius: 8px; padding: 10px; margin-bottom: 20px;">
+        <table style="width: 100%; font-size: 0.82rem; text-align: left; border-collapse: collapse;">
+          <thead>
+            <tr style="border-bottom: 1px solid var(--border-color); color: var(--text-muted);">
+              <th style="padding: 6px;">Time</th>
+              <th style="padding: 6px;">Scanned</th>
+              <th style="padding: 6px;">Jobs Found</th>
+              <th style="padding: 6px;">Trigger</th>
+              <th style="padding: 6px;">Message</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${histData.history.map(h => `
+              <tr style="border-bottom: 1px solid rgba(255,255,255,0.05);">
+                <td style="padding: 6px;">${new Date(h.checked_at).toLocaleTimeString()}</td>
+                <td style="padding: 6px;">${h.emails_scanned}</td>
+                <td style="padding: 6px;">${h.new_jobs_found}</td>
+                <td style="padding: 6px;"><code>${h.triggered_by}</code></td>
+                <td style="padding: 6px;">${escapeHtml(h.status_message)}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>
+
+      <h3 style="font-size: 1rem; margin-bottom: 8px; color: #a5b4fc;">Scanned Email Audit Trail</h3>
+      <div style="max-height: 220px; overflow-y: auto; background: rgba(0,0,0,0.3); border-radius: 8px; padding: 10px;">
+        <table style="width: 100%; font-size: 0.82rem; text-align: left; border-collapse: collapse;">
+          <thead>
+            <tr style="border-bottom: 1px solid var(--border-color); color: var(--text-muted);">
+              <th style="padding: 6px;">Subject</th>
+              <th style="padding: 6px;">Sender</th>
+              <th style="padding: 6px;">Jobs Extracted</th>
+              <th style="padding: 6px;">Classification</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${logData.logs.map(l => `
+              <tr style="border-bottom: 1px solid rgba(255,255,255,0.05);">
+                <td style="padding: 6px; font-weight: 500;">${escapeHtml(l.subject || 'No Subject')}</td>
+                <td style="padding: 6px; color: var(--text-dim);">${escapeHtml(l.sender || '')}</td>
+                <td style="padding: 6px;">${l.jobs_extracted_count || (l.is_job ? 1 : 0)}</td>
+                <td style="padding: 6px; color: var(--text-muted);">${escapeHtml(l.ai_classification_summary || '')}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>
+    `;
+
+    body.innerHTML = html;
+  } catch (err) {
+    body.innerHTML = '<p style="color:red;">Failed to load logs.</p>';
+  }
+}
+
+function closeLogsModal() {
+  document.getElementById('logs-modal').classList.remove('active');
+}
+
+// --- Utilities ---
+
+function showToast(message, type = 'info') {
+  const container = document.getElementById('toast-container');
+  const toast = document.createElement('div');
+  toast.className = 'app-toast';
+  
+  let icon = 'ℹ️';
+  if (type === 'success') icon = '✅';
+  if (type === 'error') icon = '❌';
+
+  toast.innerHTML = `<span>${icon}</span><span>${escapeHtml(message)}</span>`;
+  container.appendChild(toast);
+
+  setTimeout(() => {
+    toast.style.opacity = '0';
+    toast.style.transition = 'opacity 0.3s ease';
+    setTimeout(() => toast.remove(), 300);
+  }, 4000);
+}
+
+function escapeHtml(str) {
+  if (!str) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
