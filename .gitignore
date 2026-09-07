@@ -37,3 +37,5 @@ cloudflared.exe
 .idea/
 .DS_Store
 Thumbs.db
+
+.vercel

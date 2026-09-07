@@ -1,28 +1,36 @@
 import subprocess
 import os
 import sys
+from dotenv import load_dotenv
 
 # Ensure UTF-8 output
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8')
 
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(PROJECT_DIR, ".env"))
 
 def deploy_to_vercel():
     print("=" * 65)
     print("▲ Deploying AI Gmail Job Agent to Vercel")
+    print("Project Name: gmail-checking-agent")
     print("=" * 65)
-    print("Running: npx -y vercel --prod\n")
+
+    vc_token = os.getenv("VERCEL_TOKEN", "").strip()
+
+    cmd = ["npx", "-y", "vercel", "--name", "gmail-checking-agent", "--prod", "--yes"]
+    if vc_token:
+        cmd.extend(["--token", vc_token])
+
+    print(f"Running: {' '.join([c if c != vc_token else '***' for c in cmd])}\n")
 
     try:
-        # Run npx vercel in interactive/auto mode
-        subprocess.run(["npx", "-y", "vercel", "--prod"], cwd=PROJECT_DIR, check=True, shell=True)
-        print("\n🎉 Deployment completed! Check your Vercel Dashboard at:")
-        print("👉 https://vercel.com/deepakbeheras-projects")
-    except subprocess.CalledProcessError as e:
-        print(f"\n⚠️ Deployment process returned code {e.returncode}.")
-        print("To deploy manually, open a terminal in this folder and run:")
-        print("npx vercel")
+        proc = subprocess.run(cmd, cwd=PROJECT_DIR, text=True, shell=True)
+        if proc.returncode == 0:
+            print("\n🎉 Deployment completed! Check your Vercel Dashboard at:")
+            print("👉 https://vercel.com/deepakbeheras-projects")
+        else:
+            print(f"\n⚠️ Vercel deployment returned code {proc.returncode}.")
     except Exception as e:
         print(f"Error launching Vercel CLI: {e}")
 

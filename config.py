@@ -17,7 +17,12 @@ DEFAULT_TARGET_EMAIL = os.getenv("TARGET_EMAIL", "deepak.gvit@gmail.com")
 DEFAULT_CHECK_INTERVAL_MINS = int(os.getenv("CHECK_INTERVAL_MINUTES", "15"))
 
 # Database path
-DB_PATH = BASE_DIR / "data" / "gmail_jobs.db"
+# Vercel serverless functions have a read-only filesystem except /tmp,
+# so store the SQLite DB there when running on Vercel.
+if os.getenv("VERCEL"):
+    DB_PATH = Path("/tmp") / "gmail_jobs.db"
+else:
+    DB_PATH = BASE_DIR / "data" / "gmail_jobs.db"
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 # Gemini API Configuration

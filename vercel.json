@@ -1,5 +1,6 @@
 {
   "version": 2,
+  "name": "gmail-checking-agent",
   "builds": [
     {
       "src": "api/index.py",
