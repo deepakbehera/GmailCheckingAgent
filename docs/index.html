@@ -4,13 +4,17 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>AI Gmail Job Hunter & Notification Agent</title>
+  <!-- Google Fonts -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;600&family=Inter:wght@400;500;600&family=Outfit:wght@500;600;700;800&display=swap" rel="stylesheet">
+  <!-- Stylesheet -->
   <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
   <div class="app-container">
+    
+    <!-- Top Header -->
     <header class="app-header">
       <div class="brand-section">
         <div class="brand-logo">📬</div>
@@ -20,7 +24,7 @@
             <span>Monitoring: <strong id="header-target-email">deepak.gvit@gmail.com</strong></span>
             <div class="status-pill">
               <span class="status-dot"></span>
-              <span id="live-connection-status">Online (Mobile Dashboard)</span>
+              <span id="live-connection-status">Active (15m Interval)</span>
             </div>
           </div>
         </div>
@@ -44,10 +48,11 @@
       </div>
     </header>
 
+    <!-- Public Mobile Access URL Bar -->
     <section class="public-url-bar" id="public-url-banner">
       <div class="public-url-info">
         <span>🌐 <strong>Public Mobile Dashboard URL:</strong></span>
-        <span id="display-public-url" class="url-badge">Loading...</span>
+        <span id="display-public-url" class="url-badge">Starting public tunnel...</span>
       </div>
       <div style="display:flex; gap:8px;">
         <button class="btn btn-secondary" style="font-size:0.8rem; padding:4px 10px;" onclick="copyPublicUrl()">
@@ -59,6 +64,7 @@
       </div>
     </section>
 
+    <!-- 15-Minute Countdown & Live Status Banner -->
     <section class="countdown-banner">
       <div class="countdown-info">
         <div class="timer-box">
@@ -66,7 +72,7 @@
           <span id="countdown-timer" class="timer-digits">15:00</span>
         </div>
         <div style="font-size: 0.85rem; color: var(--text-muted);">
-          <span>Last Checked: <strong id="last-check-text" style="color: #fff;">Active</strong></span>
+          <span>Last Checked: <strong id="last-check-text" style="color: #fff;">Checking...</strong></span>
         </div>
       </div>
       <div style="font-size: 0.82rem; color: var(--text-dim); display: flex; align-items: center; gap: 8px;">
@@ -75,6 +81,7 @@
       </div>
     </section>
 
+    <!-- KPI Metric Cards -->
     <section class="stats-grid">
       <div class="stat-card total">
         <div class="stat-icon">🎯</div>
@@ -106,6 +113,7 @@
       </div>
     </section>
 
+    <!-- Search & Filter Toolbar -->
     <section class="toolbar">
       <div class="toolbar-row">
         <div class="search-box">
@@ -119,6 +127,7 @@
         </div>
       </div>
 
+      <!-- Platform Source Filters -->
       <div class="toolbar-row" style="border-top: 1px solid var(--border-color); padding-top: 12px;">
         <div class="platform-tabs">
           <span style="font-size:0.8rem; color:var(--text-muted); font-weight:600;">Platform Source:</span>
@@ -132,6 +141,7 @@
       </div>
     </section>
 
+    <!-- Consolidated Job Board Feed -->
     <main id="job-feed-container" class="job-feed">
       <div class="empty-state">
         <div class="empty-icon">⏳</div>
@@ -142,6 +152,7 @@
 
   </div>
 
+  <!-- Simulate Alert Selector Modal -->
   <div id="sim-modal" class="modal-overlay">
     <div class="modal-content" style="max-width: 480px;">
       <div class="modal-header">
@@ -174,16 +185,20 @@
     </div>
   </div>
 
+  <!-- Job Detail Modal -->
   <div id="job-modal" class="modal-overlay">
     <div class="modal-content">
       <div class="modal-header">
         <h2 id="modal-job-title">Job Details</h2>
         <button class="close-btn" onclick="closeJobModal()">&times;</button>
       </div>
-      <div class="modal-body" id="modal-job-body"></div>
+      <div class="modal-body" id="modal-job-body">
+        <!-- Content populated dynamically -->
+      </div>
     </div>
   </div>
 
+  <!-- Settings Modal -->
   <div id="settings-modal" class="modal-overlay">
     <div class="modal-content">
       <div class="modal-header">
@@ -210,11 +225,12 @@
           </div>
         </div>
         <div id="imap-credentials-box" class="form-group" style="display:none;">
-          <label>Gmail App Password (16 characters)</label>
+          <label>Gmail App Password (16 characters from Google Account Security)</label>
           <input type="password" id="set-imap-password" placeholder="e.g. abcd efgh ijkl mnop">
+          <small style="color:var(--text-dim);">Generate in Google Account -> Security -> 2-Step Verification -> App Passwords.</small>
         </div>
         <div class="form-group">
-          <label>Gemini API Key</label>
+          <label>Gemini API Key (Optional for smart AI reasoning)</label>
           <input type="password" id="set-gemini-key" placeholder="AIzaSy...">
         </div>
         <div class="form-group">
@@ -245,27 +261,36 @@
     </div>
   </div>
 
+  <!-- Mobile Sync Modal -->
   <div id="mobile-modal" class="modal-overlay">
     <div class="modal-content">
       <div class="modal-header">
-        <h2>📱 Connect Mobile Notifications</h2>
+        <h2>📱 Connect Mobile Notifications & Public Dashboard</h2>
         <button class="close-btn" onclick="closeMobileModal()">&times;</button>
       </div>
       <div class="modal-body">
         <p style="color: var(--text-muted); font-size: 0.9rem;">
-          Access your live dashboard and receive push notifications directly on your phone:
+          Access your live dashboard and receive push notifications with 1-click apply links directly on your phone:
         </p>
+        
         <div class="qr-box">
           <img id="qr-code-img" src="" alt="Scan QR Code" width="180" height="180">
           <div style="font-size: 0.85rem;">
-            <strong>Open Dashboard on mobile:</strong><br>
+            <strong>Scan with your phone's camera to open dashboard:</strong><br>
             <a id="public-dashboard-direct-link" href="#" target="_blank" style="color: #6ee7b7; text-decoration: underline; font-family: var(--font-mono); font-size: 0.82rem;">Loading...</a>
           </div>
+        </div>
+
+        <div style="background: rgba(0,0,0,0.3); padding: 14px; border-radius: 8px; border: 1px solid var(--border-color); font-size: 0.85rem;">
+          <strong>📲 Push Notifications via ntfy.sh:</strong><br>
+          <span style="color:var(--text-muted);">Topic: </span><code id="display-ntfy-topic" style="color:#a5b4fc;">deepak-job-hunter-alerts</code><br>
+          <span style="color:var(--text-dim);">Install the free <strong>ntfy</strong> app on iOS/Android or subscribe in phone browser to receive real-time job alerts!</span>
         </div>
       </div>
     </div>
   </div>
 
+  <!-- History & Audit Logs Modal -->
   <div id="logs-modal" class="modal-overlay">
     <div class="modal-content" style="max-width: 800px;">
       <div class="modal-header">
@@ -278,7 +303,10 @@
     </div>
   </div>
 
+  <!-- In-browser Toast Container -->
   <div id="toast-container"></div>
+
+  <!-- Application Script -->
   <script src="js/app.js"></script>
 </body>
 </html>

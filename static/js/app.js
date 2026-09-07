@@ -9,6 +9,12 @@ let countdownInterval = null;
 let currentSettings = {};
 let currentPublicUrl = '';
 
+// Backend API base: on GitHub Pages the Python backend runs on Vercel,
+// everywhere else (local dev / Vercel itself) we use same-origin paths.
+const API_BASE = window.location.hostname.endsWith('github.io')
+  ? 'https://gmail-checking-agent.vercel.app'
+  : '';
+
 // Initialize on page load
 document.addEventListener('DOMContentLoaded', () => {
   initApp();
@@ -26,7 +32,7 @@ async function initApp() {
 
 async function loadJobs() {
   try {
-    let url = `/api/jobs?status=${currentFilter}`;
+    let url = `${API_BASE}/api/jobs?status=${currentFilter}`;
     if (currentPlatform !== 'ALL') {
       url += `&platform=${encodeURIComponent(currentPlatform)}`;
     }
@@ -47,7 +53,7 @@ async function loadJobs() {
 
 async function loadStats() {
   try {
-    const res = await fetch('/api/stats');
+    const res = await fetch(`${API_BASE}/api/stats`);
     const data = await res.json();
     if (data.status === 'success') {
       const stats = data.stats;
@@ -116,7 +122,7 @@ function updatePlatformCounts(counts) {
 
 async function loadSettings() {
   try {
-    const res = await fetch('/api/settings');
+    const res = await fetch(`${API_BASE}/api/settings`);
     const data = await res.json();
     if (data.status === 'success') {
       currentSettings = data.settings;
@@ -139,7 +145,7 @@ async function loadSettings() {
 
 function setupSSE() {
   try {
-    const eventSource = new EventSource('/api/events');
+    const eventSource = new EventSource(`${API_BASE}/api/events`);
 
     eventSource.onopen = () => {
       document.getElementById('live-connection-status').innerText = 'Live Feed Connected';
@@ -369,7 +375,7 @@ function renderJobs(jobs) {
 async function toggleAppliedStatus(jobId, currentStatus) {
   const newStatus = currentStatus === 'APPLIED' ? 'NEW' : 'APPLIED';
   try {
-    const res = await fetch(`/api/jobs/${jobId}/status`, {
+    const res = await fetch(`${API_BASE}/api/jobs/${jobId}/status`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ status: newStatus })
@@ -399,7 +405,7 @@ async function triggerCheckNow() {
   btn.disabled = true;
 
   try {
-    const res = await fetch('/api/check-now', { method: 'POST' });
+    const res = await fetch(`${API_BASE}/api/check-now`, { method: 'POST' });
     const data = await res.json();
     showToast(`✅ ${data.message || 'Email check cycle complete!'}`, 'success');
     await loadStats();
@@ -426,7 +432,7 @@ async function simulateSpecificJob(source) {
   showToast(`🧪 Injecting simulated ${source} multi-job digest...`, 'info');
 
   try {
-    const res = await fetch(`/api/simulate-job?source=${encodeURIComponent(source)}`, { method: 'POST' });
+    const res = await fetch(`${API_BASE}/api/simulate-job?source=${encodeURIComponent(source)}`, { method: 'POST' });
     const data = await res.json();
     if (data.status === 'success') {
       showToast(`✨ ${data.message}`, 'success');
@@ -472,7 +478,7 @@ function handleSearch(val) {
 
 async function viewJobDetails(jobId) {
   try {
-    const res = await fetch(`/api/jobs/${jobId}`);
+    const res = await fetch(`${API_BASE}/api/jobs/${jobId}`);
     const data = await res.json();
     if (data.status === 'success') {
       const job = data.job;
@@ -575,7 +581,7 @@ async function saveSettings() {
   }
 
   try {
-    const res = await fetch('/api/settings', {
+    const res = await fetch(`${API_BASE}/api/settings`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(updates)
@@ -622,7 +628,7 @@ function copyPublicUrl() {
 async function testNotifications() {
   try {
     showToast('🚀 Triggering test desktop and mobile push...', 'info');
-    const res = await fetch('/api/test-notification', { method: 'POST' });
+    const res = await fetch(`${API_BASE}/api/test-notification`, { method: 'POST' });
     const data = await res.json();
     showToast(`🔔 Test fired! Public URL: ${data.public_url}`, 'success');
   } catch (err) {
@@ -637,8 +643,8 @@ async function openLogsModal() {
 
   try {
     const [historyRes, logsRes] = await Promise.all([
-      fetch('/api/history'),
-      fetch('/api/logs')
+      fetch(`${API_BASE}/api/history`),
+      fetch(`${API_BASE}/api/logs`)
     ]);
     const histData = await historyRes.json();
     const logData = await logsRes.json();
