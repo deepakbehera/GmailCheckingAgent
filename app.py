@@ -36,7 +36,15 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Start scheduler & public tunnel
+    # On Vercel serverless, skip the background scheduler and cloudflared
+    # tunnel entirely (no long-lived process, and starting them wastes
+    # precious seconds of the function time budget on every cold start).
+    if os.getenv("VERCEL"):
+        logger.info(f"{APP_TITLE} v{VERSION} initialized (serverless mode: scheduler/tunnel disabled).")
+        yield
+        return
+
+    # Start scheduler & public tunnel (local mode only)
     job_scheduler.start()
     logger.info(f"{APP_TITLE} v{VERSION} initialized.")
     yield
@@ -45,6 +53,7 @@ async def lifespan(app: FastAPI):
     tunnel_service.stop_tunnel()
 
 app = FastAPI(title=APP_TITLE, version=VERSION, lifespan=lifespan)
+
 
 app.add_middleware(
     CORSMiddleware,

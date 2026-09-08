@@ -9,7 +9,7 @@ import urllib.parse
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
 from config import IMAP_SERVER, IMAP_PORT, GMAIL_CREDENTIALS_FILE, GMAIL_TOKEN_FILE
-from database import get_setting
+from database import get_setting, is_message_already_processed
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 # Vercel serverless timeout; the 15-min scheduler (or repeated manual checks)
 # gradually works through the inbox backlog. Already-fetched mail is marked
 # read by Gmail, so each cycle naturally checkpoints forward.
-MAX_EMAILS_PER_CYCLE = 10
+MAX_EMAILS_PER_CYCLE = 5
 IMAP_SOCKET_TIMEOUT = 20  # seconds; guards against hung IMAP connections
 
 def generate_working_apply_url(job_title: str, company_name: str, platform: str = "Direct") -> str:
@@ -209,7 +209,33 @@ class EmailService:
             if not all_msg_ids:
                 logger.info("No new mail from monitored job senders in this cycle.")
 
-            for msg_id in all_msg_ids:
+            # Phase 1: cheap header-only scan (PEEK does not mark as read) to
+            # skip already-processed messages without fetching full bodies.
+            new_msg_ids = []
+            for msg_id in sorted(all_msg_ids):
+                try:
+                    status, hdr_data = mail.fetch(msg_id, '(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])')
+                    header_blob = b""
+                    for part in hdr_data or []:
+                        if isinstance(part, tuple):
+                            header_blob = part[1] or b""
+                            break
+                    mid = ""
+                    for line in header_blob.decode('utf-8', errors='ignore').splitlines():
+                        if line.lower().startswith('message-id:'):
+                            mid = line.split(':', 1)[1].strip()
+                            break
+                    if mid and is_message_already_processed(mid):
+                        continue  # already scanned in a previous cycle
+                    new_msg_ids.append(msg_id)
+                except Exception as e:
+                    logger.warning(f"Header scan failed for {msg_id}: {e}")
+                    new_msg_ids.append(msg_id)
+
+            if not new_msg_ids:
+                logger.info(f"{len(all_msg_ids)} candidate email(s) already processed - nothing new.")
+
+            for msg_id in new_msg_ids:
                 status, msg_data = mail.fetch(msg_id, '(RFC822)')
                 for response_part in msg_data:
                     if isinstance(response_part, tuple):
@@ -251,8 +277,8 @@ class EmailService:
                             "subject": decoded_subj.strip(),
                             "sender": sender,
                             "date_received": date_received,
-                            "body": body[:6000],
-                            "html_body": html_body[:8000]
+                            "body": body[:4000],
+                            "html_body": html_body[:5000]
                         })
 
             mail.logout()
