@@ -9,6 +9,11 @@ let countdownInterval = null;
 let currentSettings = {};
 let currentPublicUrl = '';
 
+// Tracks job ids seen before the latest refresh so newly-arrived jobs can be
+// temporarily highlighted with a pulsing "NEW" badge after each refresh.
+let seenJobIds = new Set();
+let newlyAddedIds = new Set();
+
 // Backend API base: on GitHub Pages the Python backend runs on Vercel,
 // everywhere else (local dev / Vercel itself) we use same-origin paths.
 const API_BASE = window.location.hostname.endsWith('github.io')
@@ -42,6 +47,17 @@ async function loadJobs() {
     const res = await fetch(url);
     const data = await res.json();
     if (data.status === 'success') {
+      // Detect newly-arrived jobs (present now, not seen in the previous load)
+      const freshIds = new Set();
+      data.jobs.forEach(j => { if (!seenJobIds.has(j.id)) freshIds.add(j.id); });
+      if (seenJobIds.size > 0 && freshIds.size > 0) {
+        freshIds.forEach(id => newlyAddedIds.add(id));
+        // Keep the highlight for 2 minutes, then the cards look normal
+        setTimeout(() => { freshIds.forEach(id => newlyAddedIds.delete(id)); applyFiltersAndRender(); }, 120000);
+        const sample = data.jobs.find(j => freshIds.has(j.id));
+        showToast(`🆕 ${freshIds.size} new job(s) added to the dashboard!`, 'success');
+      }
+      seenJobIds = new Set(data.jobs.map(j => j.id));
       allJobs = data.jobs;
       applyFiltersAndRender();
     }
@@ -295,6 +311,7 @@ function renderJobs(jobs) {
   jobs.forEach(job => {
     const isApplied = job.status === 'APPLIED';
     const appliedClass = isApplied ? 'is-applied' : '';
+    const newCardClass = newlyAddedIds.has(job.id) ? 'is-new-arrival' : '';
     const platform = job.source_platform || 'Direct';
     
     // Skills tags
@@ -325,6 +342,10 @@ function renderJobs(jobs) {
       const appliedDate = job.applied_at ? new Date(job.applied_at).toLocaleDateString() : 'Done';
       appliedBadge = `<span class="badge-applied-red">● ALREADY APPLIED (${appliedDate})</span>`;
     }
+
+    // Temporary "NEW" badge for jobs that arrived in the latest refresh
+    const isNewArrival = newlyAddedIds.has(job.id);
+    const newBadge = isNewArrival ? '<span class="badge-new-arrival">🆕 NEW</span>' : '';
 
     // Platform Badge
     const platformBadge = `<span class="badge-platform ${platform}">${platform}</span>`;
@@ -360,11 +381,12 @@ function renderJobs(jobs) {
     `;
 
     html += `
-      <div class="job-card ${appliedClass}" id="job-card-${job.id}">
+      <div class="job-card ${appliedClass} ${newCardClass}" id="job-card-${job.id}">
         <div class="job-card-header">
           <div class="job-title-group">
             <h2 class="job-title-text">${escapeHtml(job.job_title)}</h2>
             <div class="job-company-meta">
+              ${newBadge}
               ${platformBadge}
               <span class="company-pill">${escapeHtml(job.company_name)}</span>
               <span>•</span>

@@ -300,7 +300,12 @@ def get_all_jobs(status_filter: Optional[str] = None, platform_filter: Optional[
         query += " AND (job_title LIKE ? OR company_name LIKE ? OR location LIKE ? OR skills LIKE ? OR summary LIKE ? OR source_platform LIKE ?)"
         params.extend([search, search, search, search, search, search])
 
-    query += " ORDER BY CASE WHEN status = 'APPLIED' THEN 1 ELSE 0 END ASC, id DESC"
+    # Newest jobs first: order by the email's received date (parsed), falling
+    # back to internal id (insertion order) for identical/missing dates.
+    if IS_POSTGRES:
+        query += " ORDER BY CASE WHEN status = 'APPLIED' THEN 1 ELSE 0 END ASC, to_timestamp(date_received, 'Dy, DD Mon YYYY HH24:MI:SS') DESC NULLS LAST, id DESC"
+    else:
+        query += " ORDER BY CASE WHEN status = 'APPLIED' THEN 1 ELSE 0 END ASC, id DESC"
     cursor.execute(query, params)
     rows = cursor.fetchall()
     conn.close()

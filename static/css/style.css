@@ -586,6 +586,34 @@ header.app-header {
   100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
 }
 
+/* Temporary "NEW" highlight for jobs that arrived in the latest refresh */
+.badge-new-arrival {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: rgba(16, 185, 129, 0.2);
+  color: #6ee7b7;
+  border: 1px solid rgba(16, 185, 129, 0.45);
+  font-weight: 800;
+  font-size: 0.72rem;
+  padding: 2px 9px;
+  border-radius: 999px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  animation: pulse-new 1.6s infinite;
+}
+
+@keyframes pulse-new {
+  0% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.55); }
+  70% { box-shadow: 0 0 0 7px rgba(16, 185, 129, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
+}
+
+.job-card.is-new-arrival {
+  border-color: rgba(16, 185, 129, 0.5);
+  box-shadow: 0 0 18px rgba(16, 185, 129, 0.18);
+}
+
 /* Platform Source Badges */
 .badge-platform {
   display: inline-flex;
