@@ -89,6 +89,15 @@ class JobHunterScheduler:
 
             # Process each individual job extracted from the email digest
             for item in extracted_jobs:
+                # Quality gate: store only jobs that carry the REAL posting link
+                # from the email body (the user opens jobs via the exact email
+                # link). Skip heuristic placeholders that only have a generated
+                # platform search URL.
+                link_source = item.get("link_source", "")
+                if not item.get("apply_url_real") and link_source != "email":
+                    logger.info(f"Skipping placeholder job without real email link: {item.get('job_title', '?')}")
+                    continue
+
                 # If application confirmation received, auto-mark existing company job as APPLIED
                 if item.get("is_application_confirmation"):
                     company = item.get("company_name", "")
