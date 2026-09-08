@@ -293,6 +293,7 @@ def build_jobs_from_real_links(real_links: List[Dict[str, Any]], platform: str, 
             "match_score": 92,
             "is_application_confirmation": is_confirmation,
             "apply_url_real": True,
+            "_anchor_text": anchor,
         })
     return jobs
 
@@ -340,6 +341,25 @@ class AIExtractor:
         platform = detect_platform_source(sender, subject, body + " " + html_body)
         api_key = self.get_api_key()
 
+        # PRIMARY PATH: one job card per real posting link found in the email
+        # body. The apply_url is the exact link address from the email, so the
+        # dashboard's Apply Online button opens the actual job page. When a
+        # Gemini key is available, titles/companies/summaries are enriched
+        # without ever touching the exact apply URLs.
+        real_links = extract_real_job_links(html_body, body, platform)
+        if real_links:
+            full_text = f"{subject} {sender} {body}".lower()
+            is_confirmation = any(phrase in full_text for phrase in APPLICATION_CONFIRM_KEYWORDS)
+            link_jobs = build_jobs_from_real_links(real_links, platform, is_confirmation)
+
+            if api_key:
+                self._enrich_link_jobs_with_gemini(link_jobs, subject, sender, body, html_body, platform, api_key)
+
+            return link_jobs
+
+        # FALLBACK: no real links in the email - use Gemini full extraction if
+        # available (its jobs without real links are filtered by the scheduler's
+        # quality gate), otherwise heuristic analysis.
         if api_key:
             try:
                 extracted_jobs = self._analyze_multi_with_gemini(subject, sender, body, html_body, platform, api_key)
@@ -349,33 +369,83 @@ class AIExtractor:
             except Exception as e:
                 logger.warning(f"Gemini multi-job analysis failed: {e}")
 
-        # PRIMARY PATH: one job card per real posting link found in the email
-        # body. The apply_url is the exact link address from the email, so the
-        # dashboard's Apply Online button opens the actual job page.
-        real_links = extract_real_job_links(html_body, body, platform)
-        if real_links:
-            full_text = f"{subject} {sender} {body}".lower()
-            is_confirmation = any(phrase in full_text for phrase in APPLICATION_CONFIRM_KEYWORDS)
-            link_jobs = build_jobs_from_real_links(real_links, platform, is_confirmation)
-
-            # Merge in any extra heuristic jobs whose links were not covered
-            jobs = self._heuristic_multi_analysis(subject, sender, body, html_body, platform)
-            jobs = dedupe_jobs(jobs)
-            self._enrich_jobs_with_real_links(jobs, html_body, body, platform)
-
-            used_urls = {j["apply_url"] for j in link_jobs}
-            for hj in jobs:
-                if hj.get("link_source") == "email" and hj.get("apply_url") not in used_urls:
-                    link_jobs.append(hj)
-                    used_urls.add(hj["apply_url"])
-
-            return dedupe_jobs(link_jobs)
-
-        # FALLBACK: no real links in the email - use heuristic analysis
         jobs = self._heuristic_multi_analysis(subject, sender, body, html_body, platform)
         jobs = dedupe_jobs(jobs)
         self._enrich_jobs_with_real_links(jobs, html_body, body, platform)
         return jobs
+
+    def _enrich_link_jobs_with_gemini(self, jobs: List[Dict[str, Any]], subject: str, sender: str, body: str, html_body: str, platform: str, api_key: str):
+        """One Gemini call per email to fill in proper job titles, companies,
+        locations, salaries and summaries for the link-based cards. The exact
+        apply URLs extracted from the email are NEVER modified."""
+        if not jobs:
+            return
+        try:
+            from google import genai
+            from google.genai import types
+
+            client = genai.Client(api_key=api_key)
+            links_payload = [
+                {
+                    "index": i,
+                    "anchor_text": j.get("_anchor_text", "")[:200],
+                    "url": j["apply_url"][:250],
+                }
+                for i, j in enumerate(jobs)
+            ]
+            prompt = f"""
+You are a job-posting parser. The links below were extracted from a {platform} job-alert email.
+For EACH link, use the anchor text, the URL structure and the email context to determine the real job details.
+
+Email Subject: {subject[:200]}
+Email Snippet: {(body or html_body)[:800]}
+
+Links:
+{json.dumps(links_payload, indent=1)}
+
+Return ONLY raw JSON (no backticks) with this schema:
+{{
+  "jobs": [
+    {{
+      "index": <same index as input>,
+      "job_title": string (concise real job title; do not include company or location in it),
+      "company_name": string (company hiring; "Unknown" only if truly undeterminable),
+      "location": string,
+      "job_type": string,
+      "salary": string ("Not specified" if absent),
+      "skills": array of strings (empty if absent),
+      "experience_level": string,
+      "summary": string (one sentence, under 25 words)
+    }}
+  ]
+}}
+One entry per input link, same order, same count ({len(jobs)}).
+"""
+            response = client.models.generate_content(
+                model=DEFAULT_GEMINI_MODEL,
+                contents=prompt,
+                config=types.GenerateContentConfig(response_mime_type="application/json")
+            )
+            if response and response.text:
+                parsed = json.loads(response.text)
+                enriched = parsed.get("jobs", [])
+                for item in enriched:
+                    idx = item.get("index")
+                    if not isinstance(idx, int) or not (0 <= idx < len(jobs)):
+                        continue
+                    j = jobs[idx]
+                    # Enrich fields but NEVER the exact apply URL
+                    for field in ("job_title", "company_name", "location", "job_type", "salary", "experience_level", "summary"):
+                        val = item.get(field)
+                        if isinstance(val, str) and val.strip() and val != "Unknown":
+                            j[field] = val.strip()
+                    skills = item.get("skills")
+                    if isinstance(skills, list) and skills:
+                        j["skills"] = [str(s) for s in skills][:8]
+                    j["ai_enriched"] = True
+                logger.info(f"Gemini enriched {len(enriched)} link-based job card(s)")
+        except Exception as e:
+            logger.warning(f"Gemini link enrichment failed (cards keep anchor-based details): {e}")
 
     def _enrich_jobs_with_real_links(self, jobs: List[Dict[str, Any]], html_body: str, body: str, platform: str):
         """Matches extracted jobs to real links found in the email body.

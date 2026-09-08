@@ -162,6 +162,28 @@ try:
 except Exception:
     pass
 
+@app.get("/api/cron-check")
+async def api_cron_check(request: Request):
+    """Vercel Cron entrypoint: runs the same Gmail check cycle on a schedule.
+
+    Vercel automatically sends 'Authorization: Bearer <CRON_SECRET>' when the
+    CRON_SECRET env var is set on the project, so we validate that header when
+    a secret is configured. GET is used because Vercel Cron only issues GETs.
+    """
+    import os as _os
+    secret = _os.getenv("CRON_SECRET", "")
+    if secret:
+        auth = request.headers.get("authorization", "")
+        if auth != f"Bearer {secret}":
+            raise HTTPException(status_code=401, detail="Invalid cron secret")
+    result = await job_scheduler.run_email_check_cycle(triggered_by="cron")
+    return result
+
+try:
+    api_cron_check.__dict__["_vercel_max_duration"] = 60
+except Exception:
+    pass
+
 @app.post("/api/simulate-job")
 async def api_simulate_job(source: Optional[str] = None):
     """Injects a sample multi-job alert digest (LinkedIn, Naukri, Indeed, Glassdoor) for instant testing."""
