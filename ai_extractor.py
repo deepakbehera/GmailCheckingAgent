@@ -139,6 +139,7 @@ def extract_real_job_links(html_body: str, text_body: str, platform: str) -> Lis
         r'linkedin\.com/(?:jobs/view|jobs/collections|learning/jobs|comm/jobs/view)/[^\s"\'<>]+',
         r'naukri\.com/joblisting[^\s"\'<>]*',
         r'naukri\.com/[a-z0-9-]+-jobs-[^\s"\'<>]+',
+        r'naukri\.com/jd/job-listings?[^\s"\'<>]+',
         r'(?:my\.)?naukri\.com/(?:AL|msg)/[^\s"\'<>]+',
         r'indeed\.com/(?:viewjob|job|cmp/[^/]+/jobs/)[^\s"\'<>]*',
         r'glassdoor\.[a-z.]+/job-listing[^\s"\'<>]+',
