@@ -177,6 +177,30 @@ async def api_cron_check(request: Request):
         if auth != f"Bearer {secret}":
             raise HTTPException(status_code=401, detail="Invalid cron secret")
     result = await job_scheduler.run_email_check_cycle(triggered_by="cron")
+
+    # Daily digest: when the 9:03 AM IST cron runs, push a summary of what is
+    # waiting on the dashboard to the phone via ntfy (new + applied counts).
+    try:
+        stats = get_dashboard_stats()
+        total = stats.get("total_jobs", 0)
+        new_count = stats.get("new_jobs", 0)
+        applied = stats.get("applied_jobs", 0)
+        title = f"📬 Daily Job Digest: {new_count} new of {total}"
+        message = (
+            f"Dashboard status at 9 AM IST:\n"
+            f"• New jobs waiting: {new_count}\n"
+            f"• Applied: {applied}\n"
+            f"• Total tracked: {total}\n\n"
+            "Open the dashboard to review and apply."
+        )
+        notification_service.send_mobile_push(
+            title=title,
+            message=message,
+            priority="default",
+            tags="chart_with_upwards_trend,briefcase",
+        )
+    except Exception as e:
+        logger.warning(f"Cron digest push failed (cycle result unaffected): {e}")
     return result
 
 try:

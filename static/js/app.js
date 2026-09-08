@@ -512,6 +512,14 @@ async function triggerCheckNow() {
 
 // --- Bulk Actions: Mark All Applied / Delete All ---
 
+function confirmMarkAllApplied() {
+  const newCount = allJobs.filter(j => (j.status || 'NEW').toUpperCase() !== 'APPLIED').length;
+  const label = newCount > 0 ? `${newCount} job(s)` : 'all jobs';
+  if (confirm(`✅ Mark ${label} as APPLIED?\n\nEvery job will be crossed out and flagged as applied.\nTip: use the per-card toggle if you only applied to some of them.`)) {
+    markAllApplied();
+  }
+}
+
 async function markAllApplied() {
   const btn = document.getElementById('btn-mark-all-applied');
   const originalText = btn.innerHTML;
