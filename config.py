@@ -27,7 +27,7 @@ DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 # Gemini API Configuration
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-DEFAULT_GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+DEFAULT_GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
 
 # Notification Configuration
 # Default ntfy.sh topic for free, instant mobile push alerts

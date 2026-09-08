@@ -1,0 +1,44 @@
+name: Scheduled Gmail Check
+
+# Vercel Cron on the Hobby plan only allows daily schedules, so this
+# external cron triggers the same check cycle every 15 minutes by hitting
+# the deployed app's /api/cron-check endpoint (Bearer CRON_SECRET auth).
+#
+# Note: GitHub Actions scheduled runs can be delayed by a few minutes
+# during busy periods; this is still far more frequent than the daily
+# Vercel Cron. Requires repo secrets: CRON_SECRET, DASHBOARD_URL.
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: gmail-check
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Trigger Gmail check cycle
+        run: |
+          set +e
+          code=$(curl -s -o /tmp/resp.json -w "%{http_code}" \
+            -X GET \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            --max-time 180 \
+            "${{ secrets.DASHBOARD_URL }}/api/cron-check")
+          curl_exit=$?
+          echo "HTTP status: $code (curl exit: $curl_exit)"
+          cat /tmp/resp.json 2>/dev/null || true
+          echo
+          # A 200 means the cycle ran. Timeouts (exit 28) and transient
+          # 5xx/503s are logged but do not fail the workflow, matching the
+          # serverless function's 60s budget behavior.
+          if [ "$code" = "200" ]; then
+            echo "Check cycle completed successfully."
+          else
+            echo "::warning::Check cycle returned HTTP $code (curl exit $curl_exit)"
+          fi
