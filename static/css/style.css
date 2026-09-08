@@ -737,14 +737,6 @@ header.app-header {
   gap: 10px;
 }
 
-/* Direct-from-email link note (shown when no real posting link was found) */
-.link-fallback-note {
-  font-size: 0.72rem;
-  color: var(--text-dim);
-  font-style: italic;
-  margin-left: 4px;
-}
-
 /* Empty State */
 .empty-state {
   text-align: center;

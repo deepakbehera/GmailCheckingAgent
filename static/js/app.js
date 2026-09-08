@@ -350,23 +350,19 @@ function renderJobs(jobs) {
     // Platform Badge
     const platformBadge = `<span class="badge-platform ${platform}">${platform}</span>`;
 
-    // Note shown when no real email link was available
-    let fallbackNote = '';
-
     // Direct Apply URL - use the REAL link extracted from the email body.
-    // Generated platform search links are only a last-resort fallback.
+    // (Silent search-URL fallback only prevents dead buttons in edge cases;
+    // jobs without real email links are never stored in the first place.)
     let effectiveApplyUrl = job.apply_url;
     if (!effectiveApplyUrl || !effectiveApplyUrl.startsWith('http')) {
       const query = encodeURIComponent(`${job.job_title} ${job.company_name}`);
       effectiveApplyUrl = `https://www.google.com/search?q=Apply+${query}`;
-      fallbackNote = `<span class="link-fallback-note" title="No direct link found in the email body">via search</span>`;
     }
 
     const applyButton = `
       <a href="${escapeHtml(effectiveApplyUrl)}" target="_blank" rel="noopener noreferrer" class="btn btn-apply" ${job.link_source === 'email' ? 'title="Open job link from email"' : ''}>
         <span>Apply Online ↗</span>
       </a>
-      ${fallbackNote}
     `;
 
     // Applied Toggle Button
