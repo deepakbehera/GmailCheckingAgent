@@ -99,6 +99,11 @@ async function loadStats() {
 }
 
 function updatePlatformCounts(counts) {
+  // counts is {source_platform: count} from get_dashboard_stats (server-side
+  // GROUP BY over the whole jobs table), so the numbers persist across
+  // refreshes and are unaffected by the current client-side filter selection.
+  const allTab = document.querySelector('.platform-tab[data-platform="ALL"]');
+
   document.querySelectorAll('.platform-tab').forEach(tab => {
     const p = tab.getAttribute('data-platform');
     const countSpan = tab.querySelector('.tab-count') || document.createElement('span');
@@ -108,16 +113,34 @@ function updatePlatformCounts(counts) {
     countSpan.style.marginLeft = '4px';
 
     if (p === 'ALL') {
-      const total = Object.values(counts).reduce((a, b) => a + b, 0);
+      // Total = sum over every platform bucket (Direct included)
+      const known = ['LinkedIn', 'Naukri', 'Indeed', 'Glassdoor', 'Monster', 'Direct'];
+      let total = 0;
+      known.forEach(k => { total += counts[k] || 0; });
+      // Include any other platform values that might exist in the DB
+      Object.keys(counts).forEach(k => {
+        if (!known.includes(k)) total += counts[k] || 0;
+      });
       countSpan.innerText = `(${total})`;
     } else {
-      const cnt = counts[p] || 0;
+      let cnt = counts[p] || 0;
+      if (p === 'Direct') {
+        // Direct Recruiter bucket: everything not in the 5 named platforms
+        const named = ['LinkedIn', 'Naukri', 'Indeed', 'Glassdoor', 'Monster'];
+        Object.keys(counts).forEach(k => {
+          if (!named.includes(k)) cnt += counts[k] || 0;
+        });
+      }
       countSpan.innerText = `(${cnt})`;
     }
     if (!tab.querySelector('.tab-count')) {
       tab.appendChild(countSpan);
     }
   });
+
+  if (allTab) {
+    allTab.setAttribute('data-total', Object.values(counts).reduce((a, b) => a + b, 0));
+  }
 }
 
 async function loadSettings() {
@@ -220,7 +243,8 @@ function matchesPlatform(job, filter) {
   const f = filter.toLowerCase();
   
   if (f === 'direct') {
-    return p === 'direct' || (!p.includes('linkedin') && !p.includes('naukri') && !p.includes('indeed') && !p.includes('glassdoor'));
+    const named = ['linkedin', 'naukri', 'indeed', 'glassdoor', 'monster'];
+    return p === 'direct' || !named.some(n => p.includes(n));
   }
   return p.includes(f) || 
          (job.email_sender && job.email_sender.toLowerCase().includes(f)) || 
@@ -302,17 +326,23 @@ function renderJobs(jobs) {
     // Platform Badge
     const platformBadge = `<span class="badge-platform ${platform}">${platform}</span>`;
 
-    // Direct Working Apply URL
+    // Note shown when no real email link was available
+    let fallbackNote = '';
+
+    // Direct Apply URL - use the REAL link extracted from the email body.
+    // Generated platform search links are only a last-resort fallback.
     let effectiveApplyUrl = job.apply_url;
-    if (!effectiveApplyUrl || !effectiveApplyUrl.startsWith('http') || effectiveApplyUrl.includes('jk=stripe-cloud-backend')) {
+    if (!effectiveApplyUrl || !effectiveApplyUrl.startsWith('http')) {
       const query = encodeURIComponent(`${job.job_title} ${job.company_name}`);
       effectiveApplyUrl = `https://www.google.com/search?q=Apply+${query}`;
+      fallbackNote = `<span class="link-fallback-note" title="No direct link found in the email body">via search</span>`;
     }
 
     const applyButton = `
-      <a href="${escapeHtml(effectiveApplyUrl)}" target="_blank" rel="noopener noreferrer" class="btn btn-apply">
+      <a href="${escapeHtml(effectiveApplyUrl)}" target="_blank" rel="noopener noreferrer" class="btn btn-apply" ${job.link_source === 'email' ? 'title="Open job link from email"' : ''}>
         <span>Apply Online ↗</span>
       </a>
+      ${fallbackNote}
     `;
 
     // Applied Toggle Button
@@ -512,6 +542,7 @@ async function viewJobDetails(jobId) {
           Source: <strong style="color:#a5b4fc;">${escapeHtml(job.source_platform || 'Direct')}</strong> | 
           Sender: <code>${escapeHtml(job.email_sender || 'N/A')}</code><br>
           Subject: <em>${escapeHtml(job.email_subject || 'N/A')}</em>
+          ${job.link_source === 'email' ? ' | <span style="color:#34d399;">🔗 Direct link from email</span>' : ''}
         </div>
 
         <div class="form-group">

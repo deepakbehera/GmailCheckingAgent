@@ -1,56 +1,238 @@
 import sqlite3
 import json
+import os
 import urllib.parse
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 from config import DB_PATH, DEFAULT_TARGET_EMAIL, DEFAULT_CHECK_INTERVAL_MINS, DEFAULT_NTFY_TOPIC, DEFAULT_DESKTOP_NOTIFY, DEFAULT_MOBILE_NOTIFY, DEFAULT_AUTH_MODE
 
+# ---------------------------------------------------------------------------
+# Dual-backend database layer:
+#   - If DATABASE_URL is set (e.g. Neon Postgres on Vercel) -> Postgres
+#   - Otherwise -> local SQLite (data/gmail_jobs.db), unchanged behavior
+# All SQL in this file uses SQLite-style '?' placeholders; the Postgres
+# cursor wrapper transparently converts them to '%s'.
+# ---------------------------------------------------------------------------
+
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+IS_POSTGRES = DATABASE_URL.startswith(("postgres://", "postgresql://"))
+
+if IS_POSTGRES:
+    # Normalize older postgres:// scheme for psycopg2
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+
+
+class _PgCursor:
+    """Cursor wrapper over psycopg2 exposing the sqlite3-style interface used here."""
+
+    def __init__(self, pg_cursor):
+        self._cur = pg_cursor
+
+    @staticmethod
+    def _convert(sql: str, has_params: bool) -> str:
+        # Work only OUTSIDE single-quoted string literals (SQL contains literal
+        # '?' and '%' inside URLs / LIKE patterns).
+        parts = sql.split("'")
+        for i in range(0, len(parts), 2):  # even indexes are outside quotes
+            if has_params:
+                # psycopg2 applies %-formatting when params are passed:
+                # escape literal % first, then convert ? placeholders to %s
+                parts[i] = parts[i].replace("%", "%%").replace("?", "%s")
+            else:
+                # No params -> no %-interpolation; just convert ? (none expected)
+                parts[i] = parts[i].replace("?", "%s")
+        return "'".join(parts)
+
+    def execute(self, sql: str, params: tuple = ()): 
+        converted = self._convert(sql, bool(params))
+        if params:
+            self._cur.execute(converted, list(params))
+        else:
+            self._cur.execute(converted)
+        return self
+
+    def fetchone(self):
+        return self._cur.fetchone()
+
+    def fetchall(self):
+        return self._cur.fetchall()
+
+    @property
+    def lastrowid(self):
+        return getattr(self._cur, "lastrowid", None)
+
+    @property
+    def rowcount(self):
+        return self._cur.rowcount
+
+
+class _PgConnection:
+    """Connection wrapper over psycopg2 exposing the sqlite3-style interface."""
+
+    def __init__(self):
+        import psycopg2
+        import psycopg2.extras
+        self._conn = psycopg2.connect(DATABASE_URL)
+        self._cur = self._conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+
+    def cursor(self):
+        return _PgCursor(self._cur)
+
+    def commit(self):
+        self._conn.commit()
+
+    def close(self):
+        try:
+            self._cur.close()
+            self._conn.close()
+        except Exception:
+            pass
+
+
 def get_db():
+    if IS_POSTGRES:
+        return _PgConnection()
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
     return conn
+
+
+# Dialect-specific DDL -------------------------------------------------------
+
+_JOBS_COLUMNS = """
+    message_id TEXT,
+    email_subject TEXT,
+    email_sender TEXT,
+    source_platform TEXT DEFAULT 'Direct',
+    date_received TEXT,
+    job_title TEXT NOT NULL,
+    company_name TEXT NOT NULL,
+    location TEXT,
+    job_type TEXT,
+    apply_url TEXT,
+    salary TEXT,
+    skills TEXT,
+    experience_level TEXT,
+    summary TEXT,
+    raw_email_snippet TEXT,
+    status TEXT DEFAULT 'NEW',
+    applied_at TEXT,
+    notes TEXT,
+    applied_earlier INTEGER DEFAULT 0,
+    previous_application_id INTEGER,
+    previous_applied_date TEXT,
+    previous_job_title TEXT,
+    match_score INTEGER DEFAULT 80,
+    created_at TEXT,
+    updated_at TEXT
+"""
+
+def _create_schema(cursor):
+    if IS_POSTGRES:
+        cursor.execute(f"""
+        CREATE TABLE IF NOT EXISTS jobs (
+            id SERIAL PRIMARY KEY,
+            {_JOBS_COLUMNS}
+        );
+        """)
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS email_logs (
+            id SERIAL PRIMARY KEY,
+            message_id TEXT,
+            sender TEXT,
+            subject TEXT,
+            date_received TEXT,
+            is_job INTEGER DEFAULT 0,
+            jobs_extracted_count INTEGER DEFAULT 0,
+            ai_classification_summary TEXT,
+            check_cycle_timestamp TEXT,
+            created_at TEXT
+        );
+        """)
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS check_history (
+            id SERIAL PRIMARY KEY,
+            checked_at TEXT,
+            emails_scanned INTEGER DEFAULT 0,
+            new_jobs_found INTEGER DEFAULT 0,
+            status_message TEXT,
+            triggered_by TEXT DEFAULT 'scheduler',
+            created_at TEXT
+        );
+        """)
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT,
+            updated_at TEXT
+        );
+        """)
+    else:
+        cursor.execute(f"""
+        CREATE TABLE IF NOT EXISTS jobs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            {_JOBS_COLUMNS}
+        );
+        """)
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS email_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            message_id TEXT,
+            sender TEXT,
+            subject TEXT,
+            date_received TEXT,
+            is_job INTEGER DEFAULT 0,
+            jobs_extracted_count INTEGER DEFAULT 0,
+            ai_classification_summary TEXT,
+            check_cycle_timestamp TEXT,
+            created_at TEXT
+        );
+        """)
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS check_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            checked_at TEXT,
+            emails_scanned INTEGER DEFAULT 0,
+            new_jobs_found INTEGER DEFAULT 0,
+            status_message TEXT,
+            triggered_by TEXT DEFAULT 'scheduler',
+            created_at TEXT
+        );
+        """)
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT,
+            updated_at TEXT
+        );
+        """)
+
+    # Alter table if source_platform is missing from earlier schema
+    if IS_POSTGRES:
+        # Never let a failed ALTER abort the transaction: check first.
+        cursor.execute("SELECT COUNT(*) AS cnt FROM information_schema.columns WHERE table_name = 'jobs' AND column_name = 'source_platform'")
+        row = cursor.fetchone()
+        col_count = row["cnt"] if hasattr(row, "get") or isinstance(row, dict) else row[0]
+        if not col_count:
+            cursor.execute("ALTER TABLE jobs ADD COLUMN source_platform TEXT DEFAULT 'Direct'")
+    else:
+        try:
+            cursor.execute("ALTER TABLE jobs ADD COLUMN source_platform TEXT DEFAULT 'Direct'")
+        except sqlite3.OperationalError:
+            pass
+
 
 def init_db():
     conn = get_db()
     cursor = conn.cursor()
 
-    # Jobs Table
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS jobs (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        message_id TEXT,
-        email_subject TEXT,
-        email_sender TEXT,
-        source_platform TEXT DEFAULT 'Direct',
-        date_received TEXT,
-        job_title TEXT NOT NULL,
-        company_name TEXT NOT NULL,
-        location TEXT,
-        job_type TEXT,
-        apply_url TEXT,
-        salary TEXT,
-        skills TEXT,
-        experience_level TEXT,
-        summary TEXT,
-        raw_email_snippet TEXT,
-        status TEXT DEFAULT 'NEW',
-        applied_at TEXT,
-        notes TEXT,
-        applied_earlier INTEGER DEFAULT 0,
-        previous_application_id INTEGER,
-        previous_applied_date TEXT,
-        previous_job_title TEXT,
-        match_score INTEGER DEFAULT 80,
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
-    );
-    """)
-
-    # Alter table if source_platform is missing from earlier schema
-    try:
-        cursor.execute("ALTER TABLE jobs ADD COLUMN source_platform TEXT DEFAULT 'Direct'")
-    except sqlite3.OperationalError:
-        pass
+    if IS_POSTGRES:
+        # Postgres: any failed statement aborts the transaction, so schema DDL
+        # runs on its own committed connection first.
+        _create_schema(cursor)
+        conn.commit()
+    else:
+        _create_schema(cursor)
 
     # Migration: clean up any broken simulator URLs from earlier runs
     cursor.execute("""
@@ -64,43 +246,6 @@ def init_db():
     cursor.execute("UPDATE jobs SET source_platform = 'Naukri' WHERE (source_platform IS NULL OR source_platform = 'Direct') AND LOWER(email_sender) LIKE '%naukri%'")
     cursor.execute("UPDATE jobs SET source_platform = 'Indeed' WHERE (source_platform IS NULL OR source_platform = 'Direct') AND LOWER(email_sender) LIKE '%indeed%'")
     cursor.execute("UPDATE jobs SET source_platform = 'Glassdoor' WHERE (source_platform IS NULL OR source_platform = 'Direct') AND LOWER(email_sender) LIKE '%glassdoor%'")
-
-    # Email Checks Audit Log
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS email_logs (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        message_id TEXT,
-        sender TEXT,
-        subject TEXT,
-        date_received TEXT,
-        is_job INTEGER DEFAULT 0,
-        jobs_extracted_count INTEGER DEFAULT 0,
-        ai_classification_summary TEXT,
-        check_cycle_timestamp TEXT,
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP
-    );
-    """)
-
-    # 15-minute Periodic Check Run History
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS check_history (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        checked_at TEXT,
-        emails_scanned INTEGER DEFAULT 0,
-        new_jobs_found INTEGER DEFAULT 0,
-        status_message TEXT,
-        triggered_by TEXT DEFAULT 'scheduler'
-    );
-    """)
-
-    # System Settings Key-Value store
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS settings (
-        key TEXT PRIMARY KEY,
-        value TEXT,
-        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
-    );
-    """)
 
     # Populate default settings if missing
     default_settings = {
@@ -117,8 +262,15 @@ def init_db():
         "next_check_at": "",
     }
 
+    now_str = datetime.now().isoformat()
     for k, v in default_settings.items():
-        cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (k, v))
+        if IS_POSTGRES:
+            cursor.execute("""
+            INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
+            ON CONFLICT (key) DO NOTHING
+            """, (k, v, now_str))
+        else:
+            cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (k, v))
 
     conn.commit()
     conn.close()
@@ -138,7 +290,7 @@ def get_all_jobs(status_filter: Optional[str] = None, platform_filter: Optional[
     if platform_filter and platform_filter.upper() != "ALL":
         p_clean = platform_filter.strip().lower()
         if p_clean == "direct":
-            query += " AND (LOWER(COALESCE(source_platform, 'direct')) = 'direct' OR source_platform IS NULL OR source_platform = '' OR (LOWER(source_platform) NOT LIKE '%linkedin%' AND LOWER(source_platform) NOT LIKE '%naukri%' AND LOWER(source_platform) NOT LIKE '%indeed%' AND LOWER(source_platform) NOT LIKE '%glassdoor%'))"
+            query += " AND (LOWER(COALESCE(source_platform, 'direct')) = 'direct' OR source_platform IS NULL OR source_platform = '' OR (LOWER(source_platform) NOT LIKE '%linkedin%' AND LOWER(source_platform) NOT LIKE '%naukri%' AND LOWER(source_platform) NOT LIKE '%indeed%' AND LOWER(source_platform) NOT LIKE '%glassdoor%' AND LOWER(source_platform) NOT LIKE '%monster%'))"
         else:
             query += " AND (LOWER(COALESCE(source_platform, '')) LIKE ? OR LOWER(COALESCE(email_sender, '')) LIKE ? OR LOWER(COALESCE(email_subject, '')) LIKE ?)"
             params.extend([f"%{p_clean}%", f"%{p_clean}%", f"%{p_clean}%"])
@@ -167,7 +319,7 @@ def insert_job(job_data: Dict[str, Any]) -> int:
     cursor = conn.cursor()
     now_str = datetime.now().isoformat()
 
-    cursor.execute("""
+    insert_sql = """
     INSERT INTO jobs (
         message_id, email_subject, email_sender, source_platform, date_received,
         job_title, company_name, location, job_type, apply_url,
@@ -180,10 +332,10 @@ def insert_job(job_data: Dict[str, Any]) -> int:
         ?, ?, ?, ?, ?,
         ?, ?, ?, ?, ?,
         ?, ?, ?, ?, ?,
-        ?, ?, ?,
-        ?, ?
+        ?, ?, ?, ?, ?
     )
-    """, (
+    """
+    params = (
         job_data.get("message_id"),
         job_data.get("email_subject", ""),
         job_data.get("email_sender", ""),
@@ -209,8 +361,16 @@ def insert_job(job_data: Dict[str, Any]) -> int:
         job_data.get("match_score", 85),
         now_str,
         now_str
-    ))
-    job_id = cursor.lastrowid
+    )
+
+    if IS_POSTGRES:
+        cursor.execute(insert_sql + " RETURNING id", params)
+        row = cursor.fetchone()
+        job_id = row["id"]
+    else:
+        cursor.execute(insert_sql, params)
+        job_id = cursor.lastrowid
+
     conn.commit()
     conn.close()
     return job_id
@@ -253,9 +413,9 @@ def log_email_inspection(message_id: str, sender: str, subject: str, date_receiv
     cursor = conn.cursor()
     now_str = datetime.now().isoformat()
     cursor.execute("""
-    INSERT INTO email_logs (message_id, sender, subject, date_received, is_job, jobs_extracted_count, ai_classification_summary, check_cycle_timestamp)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    """, (message_id, sender, subject, date_received, 1 if is_job else 0, count, summary, now_str))
+    INSERT INTO email_logs (message_id, sender, subject, date_received, is_job, jobs_extracted_count, ai_classification_summary, check_cycle_timestamp, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (message_id, sender, subject, date_received, 1 if is_job else 0, count, summary, now_str, now_str))
     conn.commit()
     conn.close()
 
@@ -264,9 +424,9 @@ def log_check_run(emails_scanned: int, new_jobs_found: int, status_message: str,
     cursor = conn.cursor()
     now_str = datetime.now().isoformat()
     cursor.execute("""
-    INSERT INTO check_history (checked_at, emails_scanned, new_jobs_found, status_message, triggered_by)
-    VALUES (?, ?, ?, ?, ?)
-    """, (now_str, emails_scanned, new_jobs_found, status_message, triggered_by))
+    INSERT INTO check_history (checked_at, emails_scanned, new_jobs_found, status_message, triggered_by, created_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+    """, (now_str, emails_scanned, new_jobs_found, status_message, triggered_by, now_str))
     
     cursor.execute("UPDATE settings SET value = ?, updated_at = ? WHERE key = 'last_checked_at'", (now_str, now_str))
     conn.commit()
@@ -333,7 +493,8 @@ def get_setting(key: str, default_val: str = "") -> str:
     cursor.execute("SELECT value FROM settings WHERE key = ?", (key,))
     row = cursor.fetchone()
     conn.close()
-    return row["value"] if row and row["value"] else default_val
+    value = row["value"] if row else None
+    return value if value else default_val
 
 def update_settings(settings_dict: Dict[str, str]):
     conn = get_db()
@@ -352,32 +513,32 @@ def get_dashboard_stats() -> Dict[str, Any]:
     conn = get_db()
     cursor = conn.cursor()
 
-    cursor.execute("SELECT COUNT(*) FROM jobs")
-    total_jobs = cursor.fetchone()[0]
+    cursor.execute("SELECT COUNT(*) AS cnt FROM jobs")
+    total_jobs = cursor.fetchone()["cnt"]
 
-    cursor.execute("SELECT COUNT(*) FROM jobs WHERE status = 'APPLIED'")
-    applied_jobs = cursor.fetchone()[0]
+    cursor.execute("SELECT COUNT(*) AS cnt FROM jobs WHERE status = 'APPLIED'")
+    applied_jobs = cursor.fetchone()["cnt"]
 
-    cursor.execute("SELECT COUNT(*) FROM jobs WHERE status = 'NEW'")
-    new_jobs = cursor.fetchone()[0]
+    cursor.execute("SELECT COUNT(*) AS cnt FROM jobs WHERE status = 'NEW'")
+    new_jobs = cursor.fetchone()["cnt"]
 
-    cursor.execute("SELECT COUNT(*) FROM jobs WHERE applied_earlier = 1")
-    repeat_companies = cursor.fetchone()[0]
+    cursor.execute("SELECT COUNT(*) AS cnt FROM jobs WHERE applied_earlier = 1")
+    repeat_companies = cursor.fetchone()["cnt"]
 
-    cursor.execute("SELECT COUNT(*) FROM email_logs")
-    total_emails_scanned = cursor.fetchone()[0]
+    cursor.execute("SELECT COUNT(*) AS cnt FROM email_logs")
+    total_emails_scanned = cursor.fetchone()["cnt"]
 
-    cursor.execute("SELECT source_platform, COUNT(*) as cnt FROM jobs GROUP BY source_platform")
+    cursor.execute("SELECT source_platform, COUNT(*) AS cnt FROM jobs GROUP BY source_platform")
     platform_rows = cursor.fetchall()
     platform_counts = {row["source_platform"]: row["cnt"] for row in platform_rows}
 
     cursor.execute("SELECT value FROM settings WHERE key = 'last_checked_at'")
     last_check_row = cursor.fetchone()
-    last_checked_at = last_check_row[0] if last_check_row else None
+    last_checked_at = last_check_row["value"] if last_check_row else None
 
     cursor.execute("SELECT value FROM settings WHERE key = 'public_url'")
     pub_url_row = cursor.fetchone()
-    public_url = pub_url_row[0] if pub_url_row else ""
+    public_url = pub_url_row["value"] if pub_url_row else ""
 
     conn.close()
     return {

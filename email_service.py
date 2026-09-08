@@ -28,6 +28,36 @@ def generate_working_apply_url(job_title: str, company_name: str, platform: str 
         return f"https://www.glassdoor.com/Job/jobs.htm?sc.keyword={query}"
     return f"https://www.google.com/search?q=Apply+{query}+Careers"
 
+# --- Monitored Senders ---
+# Every email from these senders is fetched, opened, read and scanned for job links.
+# A leading '@' means: match ANY sender on that domain (e.g. *@naukri.com).
+MONITORED_SENDERS = [
+    "donotreply@jobalert.indeed.com",   # Indeed job alerts
+    "noreply@glassdoor.com",            # Glassdoor job alerts
+    "jobmessenger@monsterindia.com",    # Monster India job messenger
+    "jobs-noreply@linkedin.com",        # LinkedIn job alerts
+    "do-not-reply@roku.com",            # Roku careers / job notifications
+    "*@naukri.com",                     # ANY email from Naukri.com
+    "aditi@talent500.co",               # Direct recruiter (Talent500)
+]
+
+def build_sender_search_queries() -> List[str]:
+    """Builds IMAP search query for all monitored senders (domains match any
+    address @domain), restricted to UNSEEN (new, not-yet-read) emails only.
+    Emails that are already read are deliberately ignored."""
+    or_parts = []
+    for s in MONITORED_SENDERS:
+        if s.startswith("*@"):
+            or_parts.append(f'(FROM "@{s[2:]}")')
+        else:
+            or_parts.append(f'(FROM "{s}")')
+    # IMAP OR is binary: fold list into nested OR chain
+    query = or_parts[0]
+    for part in or_parts[1:]:
+        query = f"OR {query} {part}"
+    # Only NEW / UNREAD emails: UNSEEN matches messages without the \\Seen flag
+    return [f"UNSEEN {query}"]
+
 # Realistic Multi-Job Alert Templates with 100% Working Live Links
 MULTI_JOB_SIMULATOR_TEMPLATES = [
     {
@@ -155,27 +185,20 @@ class EmailService:
             mail.login(email_address, clean_pw)
             mail.select("INBOX")
 
-            search_queries = [
-                'UNSEEN',
-                '(FROM "jobalerts-noreply@linkedin.com")',
-                '(FROM "donotreply@jobalert.indeed.com")',
-                '(FROM "naukri.com")',
-                '(FROM "glassdoor.com")'
-            ]
+            # Search ONLY the monitored job-alert senders (no 'ALL' fallback:
+            # the agent must not ingest personal or unrelated mail).
+            search_queries = build_sender_search_queries()
 
             all_msg_ids = set()
             for sq in search_queries:
                 status, messages = mail.search(None, sq)
                 if status == 'OK' and messages[0]:
                     ids = messages[0].split()
-                    for i in ids[-10:]:
+                    for i in ids[-25:]:
                         all_msg_ids.add(i)
 
             if not all_msg_ids:
-                status, messages = mail.search(None, 'ALL')
-                if status == 'OK' and messages[0]:
-                    all_ids = messages[0].split()
-                    all_msg_ids = set(all_ids[-10:])
+                logger.info("No new mail from monitored job senders in this cycle.")
 
             for msg_id in all_msg_ids:
                 status, msg_data = mail.fetch(msg_id, '(RFC822)')
@@ -227,9 +250,10 @@ class EmailService:
             logger.info(f"Successfully fetched {len(emails_list)} emails via IMAP.")
             return emails_list
 
+            mail.logout()
         except Exception as e:
             logger.error(f"Error fetching emails via IMAP: {e}")
-            return []
+        return emails_list
 
     def _fetch_via_oauth(self, target_email: str) -> List[Dict[str, Any]]:
         try:
@@ -242,8 +266,13 @@ class EmailService:
             creds = Credentials.from_authorized_user_file(str(GMAIL_TOKEN_FILE), ["https://www.googleapis.com/auth/gmail.readonly"])
             service = build('gmail', 'v1', credentials=creds)
 
-            query = "is:unread OR from:linkedin.com OR from:naukri.com OR from:indeed.com OR from:glassdoor.com"
-            results = service.users().messages().list(userId='me', maxResults=10, q=query).execute()
+            # Build Gmail API query strictly from monitored job-alert senders,
+            # restricted to unread (is:unread) emails only - read mail is ignored.
+            from_terms = []
+            for s in MONITORED_SENDERS:
+                from_terms.append(f"from:{s[2:] if s.startswith('*@') else s}")
+            query = "is:unread (" + " OR ".join(from_terms) + ")"
+            results = service.users().messages().list(userId='me', maxResults=25, q=query).execute()
             messages = results.get('messages', [])
 
             emails_list = []
@@ -254,13 +283,39 @@ class EmailService:
                 sender = next((h['value'] for h in headers if h['name'] == 'From'), "Unknown")
                 snippet = msg.get('snippet', '')
                 
+                # Pull full body (text + HTML) so real apply links can be extracted
+                payload = msg.get('payload', {})
+                body_text = ""
+                html_text = ""
+
+                def _walk_payload(part):
+                    nonlocal body_text, html_text
+                    mime = part.get('mimeType', '')
+                    if part.get('body', {}).get('data'):
+                        import base64
+                        decoded = base64.urlsafe_b64decode(part['body']['data']).decode('utf-8', errors='ignore')
+                        if mime == 'text/plain':
+                            body_text += decoded
+                        elif mime == 'text/html':
+                            html_text += decoded
+                    for child in part.get('parts', []) or []:
+                        _walk_payload(child)
+
+                _walk_payload(payload)
+                if not body_text and not html_text:
+                    try:
+                        full = service.users().messages().get(userId='me', id=m['id'], format='full').execute()
+                        _walk_payload(full.get('payload', {}))
+                    except Exception:
+                        pass
+
                 emails_list.append({
                     "message_id": m['id'],
                     "subject": subject,
                     "sender": sender,
                     "date_received": datetime.now().isoformat(),
-                    "body": snippet,
-                    "html_body": ""
+                    "body": body_text[:6000] or snippet,
+                    "html_body": html_text[:8000]
                 })
             return emails_list
         except Exception as e:
