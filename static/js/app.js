@@ -35,6 +35,42 @@ async function initApp() {
 
 // --- REST API Calls ---
 
+// Cold-start resilience: Vercel serverless functions can take ~30s to wake on
+// the first request after inactivity, and the very first fetch may fail while
+// the instance boots. Retry transient failures instead of leaving the
+// dashboard stuck on an empty state.
+let coldStartStatusTouched = false;
+
+async function fetchWithRetry(url, opts = {}, retries = 4, delayMs = 6000) {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const res = await fetch(url, opts);
+      if (res.status < 500) return res; // 4xx = real error, surface it
+      console.warn(`Server responded ${res.status} (attempt ${attempt}/${retries}) - retrying`);
+    } catch (err) {
+      console.warn(`Request failed (attempt ${attempt}/${retries}):`, err.message || err);
+    }
+    if (attempt < retries) {
+      const pill = document.getElementById('live-connection-status');
+      if (pill) {
+        pill.innerText = `Waking up server... (${attempt}/${retries})`;
+        coldStartStatusTouched = true;
+      }
+      await new Promise(r => setTimeout(r, delayMs));
+    }
+  }
+  throw new Error(`Server did not respond after ${retries} attempts`);
+}
+
+function clearColdStartStatus() {
+  if (!coldStartStatusTouched) return;
+  const pill = document.getElementById('live-connection-status');
+  if (pill && pill.innerText.startsWith('Waking up')) {
+    pill.innerText = 'Live Feed Connected';
+  }
+  coldStartStatusTouched = false;
+}
+
 async function loadJobs() {
   try {
     let url = `${API_BASE}/api/jobs?status=${currentFilter}`;
@@ -44,9 +80,10 @@ async function loadJobs() {
     if (searchQuery.trim()) {
       url += `&q=${encodeURIComponent(searchQuery.trim())}`;
     }
-    const res = await fetch(url);
+    const res = await fetchWithRetry(url);
     const data = await res.json();
     if (data.status === 'success') {
+      clearColdStartStatus();
       // Detect newly-arrived jobs (present now, not seen in the previous load)
       const freshIds = new Set();
       data.jobs.forEach(j => { if (!seenJobIds.has(j.id)) freshIds.add(j.id); });
@@ -63,15 +100,18 @@ async function loadJobs() {
     }
   } catch (err) {
     console.error('Failed to load jobs:', err);
+    const pill = document.getElementById('live-connection-status');
+    if (pill && coldStartStatusTouched) pill.innerText = 'Connection failed - try refresh';
     showToast('❌ Error loading jobs from server', 'error');
   }
 }
 
 async function loadStats() {
   try {
-    const res = await fetch(`${API_BASE}/api/stats`);
+    const res = await fetchWithRetry(`${API_BASE}/api/stats`);
     const data = await res.json();
     if (data.status === 'success') {
+      clearColdStartStatus();
       const stats = data.stats;
       document.getElementById('stat-total-jobs').innerText = stats.total_jobs || 0;
       document.getElementById('stat-new-jobs').innerText = stats.new_jobs || 0;
@@ -161,7 +201,7 @@ function updatePlatformCounts(counts) {
 
 async function loadSettings() {
   try {
-    const res = await fetch(`${API_BASE}/api/settings`);
+    const res = await fetchWithRetry(`${API_BASE}/api/settings`);
     const data = await res.json();
     if (data.status === 'success') {
       currentSettings = data.settings;
