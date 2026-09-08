@@ -14,6 +14,13 @@ from database import get_setting
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Max emails processed per check cycle. Kept small so a cycle fits inside the
+# Vercel serverless timeout; the 15-min scheduler (or repeated manual checks)
+# gradually works through the inbox backlog. Already-fetched mail is marked
+# read by Gmail, so each cycle naturally checkpoints forward.
+MAX_EMAILS_PER_CYCLE = 10
+IMAP_SOCKET_TIMEOUT = 20  # seconds; guards against hung IMAP connections
+
 def generate_working_apply_url(job_title: str, company_name: str, platform: str = "Direct") -> str:
     """Generates a guaranteed working, live search/apply URL for any role and company."""
     query = urllib.parse.quote(f"{job_title} {company_name}")
@@ -181,7 +188,7 @@ class EmailService:
         emails_list = []
         try:
             clean_pw = app_password.replace(" ", "")
-            mail = imaplib.IMAP4_SSL(IMAP_SERVER, IMAP_PORT)
+            mail = imaplib.IMAP4_SSL(IMAP_SERVER, IMAP_PORT, timeout=IMAP_SOCKET_TIMEOUT)
             mail.login(email_address, clean_pw)
             mail.select("INBOX")
 
@@ -194,7 +201,9 @@ class EmailService:
                 status, messages = mail.search(None, sq)
                 if status == 'OK' and messages[0]:
                     ids = messages[0].split()
-                    for i in ids[-25:]:
+                    # Process only the newest batch each cycle to stay within
+                    # the serverless function time budget.
+                    for i in ids[-MAX_EMAILS_PER_CYCLE:]:
                         all_msg_ids.add(i)
 
             if not all_msg_ids:

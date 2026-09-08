@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import os
 from contextlib import asynccontextmanager
 from typing import Optional, Dict, Any, List
 from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
@@ -126,6 +127,13 @@ async def api_delete_job(job_id: int):
 async def api_trigger_check():
     result = await job_scheduler.run_email_check_cycle(triggered_by="manual")
     return result
+
+# Vercel serverless: give the Gmail IMAP check cycle up to 60s (Hobby plan
+# max). Locally this decorator argument is ignored by uvicorn.
+try:
+    api_trigger_check.__dict__["_vercel_max_duration"] = 60
+except Exception:
+    pass
 
 @app.post("/api/simulate-job")
 async def api_simulate_job(source: Optional[str] = None):
