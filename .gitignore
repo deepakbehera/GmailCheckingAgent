@@ -39,3 +39,5 @@ cloudflared.exe
 Thumbs.db
 
 .vercel
+*.log
+backfill_run.log
