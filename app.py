@@ -22,7 +22,9 @@ from database import (
     get_all_settings,
     update_settings,
     get_setting,
-    insert_job
+    insert_job,
+    mark_all_jobs_applied,
+    delete_all_jobs
 )
 from scheduler import job_scheduler
 from notification_service import notification_service
@@ -226,6 +228,20 @@ async def api_get_logs(limit: int = 50):
 async def api_get_history(limit: int = 30):
     history = get_check_history(limit)
     return {"status": "success", "history": history}
+
+@app.post("/api/jobs/mark-all-applied")
+async def api_mark_all_applied():
+    """Marks every stored job as APPLIED (strikethrough + red badge on the dashboard)."""
+    count = mark_all_jobs_applied()
+    await job_scheduler.broadcast_event("JOBS_BULK_UPDATED", {"action": "mark_all_applied", "count": count})
+    return {"status": "success", "message": f"Marked {count} job(s) as Applied.", "updated": count}
+
+@app.delete("/api/jobs/all")
+async def api_delete_all_jobs():
+    """Clears and deletes ALL jobs from the dashboard/database."""
+    count = delete_all_jobs()
+    await job_scheduler.broadcast_event("JOBS_BULK_UPDATED", {"action": "delete_all", "count": count})
+    return {"status": "success", "message": f"Deleted {count} job(s). Dashboard cleared.", "deleted": count}
 
 @app.get("/api/settings")
 async def api_get_settings():

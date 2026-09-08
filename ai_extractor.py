@@ -136,17 +136,18 @@ def extract_real_job_links(html_body: str, text_body: str, platform: str) -> Lis
 
     # Platform job-URL patterns: these are genuine posting links, not search pages
     platform_url_patterns = [
-        r'linkedin\.com/(?:jobs/view|jobs/collections|learning/jobs)/[^\s"\'<>]+',
+        r'linkedin\.com/(?:jobs/view|jobs/collections|learning/jobs|comm/jobs/view)/[^\s"\'<>]+',
         r'naukri\.com/joblisting[^\s"\'<>]*',
         r'naukri\.com/[a-z0-9-]+-jobs-[^\s"\'<>]+',
+        r'(?:my\.)?naukri\.com/(?:AL|msg)/[^\s"\'<>]+',
         r'indeed\.com/(?:viewjob|job|cmp/[^/]+/jobs/)[^\s"\'<>]*',
-        r'glassdoor\.com/job-listing[^\s"\'<>]+',
+        r'glassdoor\.[a-z.]+/job-listing[^\s"\'<>]+',
         r'monsterindia\.com/job-search/[a-z0-9_-]+[^\s"\'<>]*',
         r'monster\.com/job-openings/[^\s"\'<>]+',
         r'roku\.com/(?:careers?|jobs?)/[^\s"\'<>]+',
         r'talent500\.co/(?:jobs?|open-roles?|careers?)/[^\s"\'<>]+',
         r'jobalert\.indeed\.com/(?:email|alerts?)/[^\s"\'<>]+',
-        r'glassdoor\.com/partner/jobListing\.htm[^\s"\'<>]+',
+        r'glassdoor\.[a-z.]+/partner/jobListing\.htm[^\s"\'<>]+',
     ]
     pattern_re = re.compile('|'.join(f'(?:{p})' for p in platform_url_patterns), re.IGNORECASE)
 
@@ -158,10 +159,14 @@ def extract_real_job_links(html_body: str, text_body: str, platform: str) -> Lis
 
     def is_junk(u: str) -> bool:
         u_low = u.lower()
-        if any(p in u_low for p in _JUNK_URL_PATTERNS):
-            return True
         # Exclude generated platform SEARCH pages - the user wants real job links only
         if any(p in u_low for p in _SEARCH_URL_PATTERNS):
+            return True
+        # Junk/marketing filter: only reject if the URL path (before '?') hits a
+        # junk pattern. Real job links usually carry utm_/campaign TRACKING PARAMS
+        # in the query string, which must NOT disqualify them.
+        path_part = u_low.split('?', 1)[0]
+        if any(p in path_part for p in _JUNK_URL_PATTERNS):
             return True
         return False
 
@@ -187,6 +192,108 @@ def titleize_anchor(text: str) -> str:
     if len(t) > 90:
         t = t[:90].rsplit(' ', 1)[0]
     return t
+
+def parse_company_from_anchor(anchor: str) -> str:
+    """Extracts the company name from a job link anchor text.
+
+    Handles common email formats:
+      'KPMG India Python Ai Testing KPMG India · Bengaluru, ...'  -> KPMG India
+      'GE HealthCare Staff Automation & Verification Lead GE HealthCare · ...' -> GE HealthCare
+      'Engineer Software - Java Full Stack at Empower' -> Empower
+    """
+    if not anchor:
+        return ""
+    t = re.sub(r'\s+', ' ', anchor).strip()
+
+    # LinkedIn style: 'TITLE COMPANY · LOCATION ...' -> company = first group
+    # after the title (they repeat the company name before the dot separator).
+    if '·' in t:
+        before_dot = t.split('·')[0].strip()
+        words = before_dot.split()
+        # The company name usually appears TWICE (start & end): e.g.
+        # 'KPMG India Python Ai Testing KPMG India'. If the first N words
+        # match the last N words (N=1..4), that repeated group is the company.
+        for n in (4, 3, 2, 1):
+            if len(words) < 2 * n:
+                continue
+            head = [w.lower().strip('&,') for w in words[:n]]
+            tail = [w.lower().strip('&,') for w in words[-n:]]
+            if head == tail:
+                return ' '.join(words[:n])
+        # No repetition: try known company suffixes at the end
+        m = re.search(r'([A-Z][A-Za-z0-9&. ]*\s(?:India|Inc|Corp|LLC|Labs|Technologies|Solutions|Group|HealthCare|Digital|Software|Systems))\s*$', before_dot)
+        if m:
+            return m.group(1).strip()
+        # Single trailing capitalized word that is not a job word
+        job_words = {'engineer', 'developer', 'manager', 'lead', 'testing',
+                     'staff', 'senior', 'junior', 'principal', 'architect',
+                     'analyst', 'specialist', 'ai', 'python', 'automation',
+                     'verification', 'software', 'intern', 'associate', 'ml'}
+        if words and words[-1][0:1].isupper() and words[-1].lower().strip('&,') not in job_words:
+            return words[-1]
+        return ""
+
+    # 'X at Y' / 'X - Y' patterns - but the tail must look like a company
+    # (title case, short, not a location/salary/experience fragment)
+    for sep in [' at ', ' – ', ' - ', ' | ']:
+        idx = t.lower().rfind(sep)
+        if idx > 0:
+            tail = t[idx + len(sep):].strip().rstrip('·,')
+            if 2 <= len(tail) <= 40 and not re.match(r'^(remote|hybrid|bengaluru|india|hyderabad|pune|mumbai|delhi|chennai|kolkata|gurgaon|noida|\d)', tail, re.IGNORECASE) and not re.search(r'\d', tail):
+                return tail
+
+    # Naukri style: 'TITLE LOCATION EXP SALARY SKILLS...' with no company
+    # marker: fall back to empty (company stays generic).
+    return ""
+
+def build_jobs_from_real_links(real_links: List[Dict[str, Any]], platform: str, is_confirmation: bool) -> List[Dict[str, Any]]:
+    """Creates one job card per real posting link found in the email body.
+
+    The apply_url IS the exact link copied from the email ('Copy Link Address'),
+    and the title/company come from the link's anchor text - so the dashboard's
+    Apply Online button opens the exact job page from the email."""
+    jobs = []
+    for link in real_links:
+        url = link["url"]
+        anchor = titleize_anchor(link.get("anchor_text", ""))
+        company = parse_company_from_anchor(anchor)
+        title = anchor
+
+        # Clean the title: strip trailing location/company fragments
+        if title and '·' in title:
+            title = title.split('·')[0].strip()
+        if title and company:
+            # Remove company name occurrences from the START and END (emails
+            # often repeat the company: 'KPMG India Python Ai Testing KPMG India')
+            comp_low = company.lower()
+            while title.lower().startswith(comp_low):
+                title = title[len(company):].strip(' -–|·,.')
+            while title.lower().endswith(comp_low):
+                title = title[:-len(company)].strip(' -–|·,.')
+        # Trailing location / noise cleanup
+        title = re.sub(r'\s+(?:·|\||-)?\s*(?:Hyderabad|Bengaluru|Bangalore|Pune|Mumbai|Delhi|Chennai|Hybrid|Remote|India)[\s,.0-9()\-–]*$', '', title, flags=re.IGNORECASE)
+        title = re.sub(r'\s+\d+\s*-\s*\d+\s+years?\s*.*$', '', title, flags=re.IGNORECASE)
+        title = re.sub(r'\s+\d+\.\d+\s*★.*$', '', title)
+        title = re.sub(r'\s*\(Walk-In\)\s*$', '', title, flags=re.IGNORECASE)
+        title = re.sub(r'\s+\d+L\s*-\s*\d+L.*$', '', title)
+        title = title.replace('&amp;', '&').strip(' -–|·,')
+
+        jobs.append({
+            "job_title": title or "Job from Email",
+            "company_name": company or "Company from Email",
+            "location": "As per posting",
+            "job_type": "Full-time",
+            "apply_url": url,
+            "salary": "Not specified",
+            "skills": [],
+            "experience_level": "Not specified",
+            "summary": f"Direct job link extracted from {platform} email" + (f": {anchor}" if anchor else "."),
+            "source_platform": platform,
+            "match_score": 92,
+            "is_application_confirmation": is_confirmation,
+            "apply_url_real": True,
+        })
+    return jobs
 
 def _clean_company_name(name: str) -> str:
     """Strips trailing noise the plain-text regexes tend to capture into company
@@ -241,6 +348,29 @@ class AIExtractor:
             except Exception as e:
                 logger.warning(f"Gemini multi-job analysis failed: {e}")
 
+        # PRIMARY PATH: one job card per real posting link found in the email
+        # body. The apply_url is the exact link address from the email, so the
+        # dashboard's Apply Online button opens the actual job page.
+        real_links = extract_real_job_links(html_body, body, platform)
+        if real_links:
+            full_text = f"{subject} {sender} {body}".lower()
+            is_confirmation = any(phrase in full_text for phrase in APPLICATION_CONFIRM_KEYWORDS)
+            link_jobs = build_jobs_from_real_links(real_links, platform, is_confirmation)
+
+            # Merge in any extra heuristic jobs whose links were not covered
+            jobs = self._heuristic_multi_analysis(subject, sender, body, html_body, platform)
+            jobs = dedupe_jobs(jobs)
+            self._enrich_jobs_with_real_links(jobs, html_body, body, platform)
+
+            used_urls = {j["apply_url"] for j in link_jobs}
+            for hj in jobs:
+                if hj.get("link_source") == "email" and hj.get("apply_url") not in used_urls:
+                    link_jobs.append(hj)
+                    used_urls.add(hj["apply_url"])
+
+            return dedupe_jobs(link_jobs)
+
+        # FALLBACK: no real links in the email - use heuristic analysis
         jobs = self._heuristic_multi_analysis(subject, sender, body, html_body, platform)
         jobs = dedupe_jobs(jobs)
         self._enrich_jobs_with_real_links(jobs, html_body, body, platform)

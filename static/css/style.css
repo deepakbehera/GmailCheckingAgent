@@ -265,6 +265,20 @@ header.app-header {
   box-shadow: 0 0 12px var(--applied-red-glow);
 }
 
+.btn-danger {
+  background: rgba(239, 68, 68, 0.15);
+  color: #fca5a5;
+  border: 1px solid rgba(239, 68, 68, 0.35);
+}
+
+.btn-danger:hover {
+  background: var(--applied-red);
+  color: #fff;
+  border-color: #b91c1c;
+  transform: translateY(-1px);
+  box-shadow: 0 0 12px var(--applied-red-glow);
+}
+
 /* Countdown & Live Check Bar */
 .countdown-banner {
   background: linear-gradient(90deg, rgba(99, 102, 241, 0.1), rgba(6, 182, 212, 0.1));

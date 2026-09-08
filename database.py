@@ -408,6 +408,33 @@ def delete_job(job_id: int) -> bool:
     conn.close()
     return success
 
+def mark_all_jobs_applied() -> int:
+    """Marks every job as APPLIED (keeps existing applied_at if already set)."""
+    conn = get_db()
+    cursor = conn.cursor()
+    now_str = datetime.now().isoformat()
+    cursor.execute("""
+    UPDATE jobs
+    SET status = 'APPLIED', applied_at = COALESCE(applied_at, ?), updated_at = ?
+    WHERE status != 'APPLIED'
+    """, (now_str, now_str))
+    count = cursor.rowcount
+    conn.commit()
+    conn.close()
+    return count
+
+def delete_all_jobs() -> int:
+    """Deletes every job from the dashboard/database. Returns count deleted."""
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) AS cnt FROM jobs")
+    row = cursor.fetchone()
+    count = row["cnt"] if row else 0
+    cursor.execute("DELETE FROM jobs")
+    conn.commit()
+    conn.close()
+    return count
+
 def log_email_inspection(message_id: str, sender: str, subject: str, date_received: str, is_job: bool, summary: str, count: int = 0):
     conn = get_db()
     cursor = conn.cursor()

@@ -191,6 +191,9 @@ function setupSSE() {
         } else if (payload.type === 'JOB_STATUS_UPDATED') {
           loadStats();
           loadJobs();
+        } else if (payload.type === 'JOBS_BULK_UPDATED') {
+          loadStats();
+          loadJobs();
         }
       } catch (parseErr) {
         // keepalive
@@ -443,6 +446,64 @@ async function triggerCheckNow() {
   } catch (err) {
     console.error('Error checking emails:', err);
     showToast('Check failed. Verify network or credentials.', 'error');
+  } finally {
+    btn.innerHTML = originalText;
+    btn.disabled = false;
+  }
+}
+
+// --- Bulk Actions: Mark All Applied / Delete All ---
+
+async function markAllApplied() {
+  const btn = document.getElementById('btn-mark-all-applied');
+  const originalText = btn.innerHTML;
+  btn.innerHTML = '<span>⏳ Marking...</span>';
+  btn.disabled = true;
+  try {
+    const res = await fetch(`${API_BASE}/api/jobs/mark-all-applied`, { method: 'POST' });
+    const data = await res.json();
+    if (data.status === 'success') {
+      showToast(`✅ ${data.message}`, 'success');
+      await loadStats();
+      await loadJobs();
+    } else {
+      showToast('Failed to mark all as applied', 'error');
+    }
+  } catch (err) {
+    console.error('Error marking all applied:', err);
+    showToast('Failed to mark all as applied', 'error');
+  } finally {
+    btn.innerHTML = originalText;
+    btn.disabled = false;
+  }
+}
+
+function confirmDeleteAll() {
+  const total = allJobs.length;
+  const label = total > 0 ? `${total} job(s)` : 'all jobs';
+  if (confirm(`⚠️ Delete ALL ${label} from the dashboard?\n\nThis permanently removes every job record. This cannot be undone.`)) {
+    deleteAllJobs();
+  }
+}
+
+async function deleteAllJobs() {
+  const btn = document.getElementById('btn-delete-all');
+  const originalText = btn.innerHTML;
+  btn.innerHTML = '<span>⏳ Deleting...</span>';
+  btn.disabled = true;
+  try {
+    const res = await fetch(`${API_BASE}/api/jobs/all`, { method: 'DELETE' });
+    const data = await res.json();
+    if (data.status === 'success') {
+      showToast(`🗑️ ${data.message}`, 'success');
+      await loadStats();
+      await loadJobs();
+    } else {
+      showToast('Failed to delete jobs', 'error');
+    }
+  } catch (err) {
+    console.error('Error deleting all jobs:', err);
+    showToast('Failed to delete jobs', 'error');
   } finally {
     btn.innerHTML = originalText;
     btn.disabled = false;
