@@ -31,6 +31,7 @@ async function initApp() {
   await loadStats();
   await loadJobs();
   startLocalCountdown();
+  checkAndPromptForAppPassword();
 }
 
 // --- REST API Calls ---
@@ -133,14 +134,22 @@ async function loadStats() {
       }
 
       if (stats.last_checked_at) {
-        const d = new Date(stats.last_checked_at);
-        document.getElementById('last-check-text').innerText = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        document.getElementById('last-check-text').innerText = formatIST(stats.last_checked_at);
       } else {
         document.getElementById('last-check-text').innerText = 'Pending initial cycle';
       }
 
       if (stats.next_check_at) {
+        // Server now returns UTC-aware ISO strings; Date parses the offset
+        // correctly regardless of the viewer's local timezone.
         nextCheckTime = new Date(stats.next_check_at).getTime();
+        // Ignore stale server timestamps: if next_check_at is already in the
+        // past (server down, cold start, old data), restart from the full
+        // interval instead of showing a stuck 00:00 that flickers.
+        if (nextCheckTime < Date.now() - 5000) {
+          const intervalMins = parseInt(stats.check_interval_mins || '15', 10);
+          nextCheckTime = Date.now() + intervalMins * 60 * 1000;
+        }
       } else {
         const intervalMins = parseInt(stats.check_interval_mins || '15', 10);
         nextCheckTime = Date.now() + intervalMins * 60 * 1000;
@@ -212,7 +221,22 @@ async function loadSettings() {
       document.getElementById('set-ntfy-topic').value = currentSettings.ntfy_topic || 'deepak-job-hunter-alerts';
       document.getElementById('set-desktop-notify').value = currentSettings.desktop_notify || 'true';
       document.getElementById('set-mobile-notify').value = currentSettings.mobile_notify || 'true';
-      
+
+      // Show whether an App Password is already stored (the real value is
+      // never sent to the browser).
+      const pwStatus = document.getElementById('imap-pw-status');
+      if (pwStatus) {
+        if (currentSettings.imap_password_set) {
+          pwStatus.innerHTML = '✅ A password is currently saved ' +
+            (currentSettings.imap_password_masked || '') +
+            ' — type a new one above only if you want to replace it.';
+          pwStatus.style.color = '#34d399';
+        } else {
+          pwStatus.innerHTML = '⚠️ No App Password saved yet — the inbox cannot be scanned until one is entered.';
+          pwStatus.style.color = '#fbbf24';
+        }
+      }
+
       toggleAuthFields(currentSettings.auth_mode || 'simulator');
     }
   } catch (err) {
@@ -278,11 +302,11 @@ function startLocalCountdown() {
     const diff = nextCheckTime - now;
 
     if (diff <= 0) {
+      // Held at zero instead of resetting: loadStats() updates nextCheckTime
+      // from the server, and the interval guard prevents flicker from stale
+      // timestamps racing a fresh one.
       document.getElementById('countdown-timer').innerText = '00:00';
       loadStats();
-      loadJobs();
-      const intervalMins = parseInt(currentSettings.check_interval_mins || '15', 10);
-      nextCheckTime = Date.now() + intervalMins * 60 * 1000;
       return;
     }
 
@@ -705,12 +729,64 @@ function closeJobModal() {
   document.getElementById('job-modal').classList.remove('active');
 }
 
+// --- IST time formatting (Asia/Kolkata) ---
+
+function formatIST(isoString) {
+  try {
+    const d = new Date(isoString);
+    if (isNaN(d.getTime())) return isoString;
+    return d.toLocaleTimeString('en-IN', {
+      timeZone: 'Asia/Kolkata',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: true
+    }) + ' IST';
+  } catch (e) {
+    return isoString;
+  }
+}
+
+// --- App Password help modal ---
+
+function openAppPasswordHelp() {
+  document.getElementById('apppw-help-modal').classList.add('active');
+}
+
+function closeAppPasswordHelp() {
+  document.getElementById('apppw-help-modal').classList.remove('active');
+}
+
+function focusAppPasswordField() {
+  const field = document.getElementById('set-imap-password');
+  if (field) field.focus();
+}
+
 function openSettingsModal() {
   document.getElementById('settings-modal').classList.add('active');
 }
 
 function closeSettingsModal() {
   document.getElementById('settings-modal').classList.remove('active');
+}
+
+// If Gmail IMAP mode is active but no App Password is stored, open Settings
+// automatically so the user can enter one.
+function checkAndPromptForAppPassword() {
+  fetch(`${API_BASE}/api/settings`)
+    .then(r => r.json())
+    .then(data => {
+      if (data.status !== 'success') return;
+      const s = data.settings;
+      const mode = s.auth_mode || 'simulator';
+      const hasPw = Boolean(s.imap_password_set);
+      if (mode === 'imap' && !hasPw) {
+        openSettingsModal();
+        toggleAuthFields('imap');
+        showToast('🔑 Enter your 16-character Gmail App Password to start scanning your inbox.', 'info');
+      }
+    })
+    .catch(() => { /* non-fatal */ });
 }
 
 function toggleAuthFields(mode) {

@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
@@ -144,7 +144,9 @@ class JobHunterScheduler:
 
         # Update check history & next check estimate
         interval_mins = int(get_setting("check_interval_mins", "15"))
-        next_check = datetime.now() + timedelta(minutes=interval_mins)
+        # UTC-aware ISO string so every browser (any timezone) computes the
+        # same countdown; the dashboard renders it as IST.
+        next_check = datetime.now(timezone.utc) + timedelta(minutes=interval_mins)
         update_settings({"next_check_at": next_check.isoformat()})
 
         status_msg = f"Scanned {emails_scanned} emails, found {len(new_jobs_found)} new job(s)."

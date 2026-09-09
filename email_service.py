@@ -39,12 +39,17 @@ def generate_working_apply_url(job_title: str, company_name: str, platform: str 
 # Every email from these senders is fetched, opened, read and scanned for job links.
 # A leading '@' means: match ANY sender on that domain (e.g. *@naukri.com).
 MONITORED_SENDERS = [
-    "donotreply@jobalert.indeed.com",   # Indeed job alerts
-    "noreply@glassdoor.com",            # Glassdoor job alerts
+    "*@indeed.com",                     # Indeed job alerts (covers jobalert.indeed.com)
+    "*@glassdoor.com",                  # Glassdoor job alerts
     "jobmessenger@monsterindia.com",    # Monster India job messenger
     "jobs-noreply@linkedin.com",        # LinkedIn job alerts
+    "jobalerts-noreply@linkedin.com",   # LinkedIn job alerts (alternate sender)
     "do-not-reply@roku.com",            # Roku careers / job notifications
     "*@naukri.com",                     # ANY email from Naukri.com
+    "*@foundit.in",                     # Foundit (formerly Monster) job alerts
+    "*@hirist.tech",                    # Hirist job alerts
+    "*@jobfeed.hirist.com",             # Hirist job feed digests
+    "*@hackerearth.com",                # HackerEarth job/opportunity mails
     "aditi@talent500.co",               # Direct recruiter (Talent500)
 ]
 

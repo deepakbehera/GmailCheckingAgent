@@ -294,7 +294,12 @@ async def api_get_history(limit: int = 30):
 @app.get("/api/settings")
 async def api_get_settings():
     settings = get_all_settings()
-    if settings.get("imap_password"):
+    has_password = bool(str(settings.get("imap_password", "")).strip())
+    # Security: never send the real App Password to the browser — only a flag
+    # saying whether one is stored, plus a masked placeholder for display.
+    settings.pop("imap_password", None)
+    settings["imap_password_set"] = has_password
+    if has_password:
         settings["imap_password_masked"] = "••••••••••••••••"
     return {"status": "success", "settings": settings}
 

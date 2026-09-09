@@ -502,7 +502,9 @@ def log_email_inspection(message_id: str, sender: str, subject: str, date_receiv
 def log_check_run(emails_scanned: int, new_jobs_found: int, status_message: str, triggered_by: str = "scheduler"):
     conn = get_db()
     cursor = conn.cursor()
-    now_str = datetime.now().isoformat()
+    # UTC-aware ISO string: the dashboard displays this as IST, and the
+    # countdown relies on next_check_at/last_checked_at sharing one clock.
+    now_str = datetime.now(timezone.utc).isoformat()
     cursor.execute("""
     INSERT INTO check_history (checked_at, emails_scanned, new_jobs_found, status_message, triggered_by, created_at)
     VALUES (?, ?, ?, ?, ?, ?)

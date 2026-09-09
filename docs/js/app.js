@@ -9,6 +9,11 @@ let countdownInterval = null;
 let currentSettings = {};
 let currentPublicUrl = '';
 
+// Tracks job ids seen before the latest refresh so newly-arrived jobs can be
+// temporarily highlighted with a pulsing "NEW" badge after each refresh.
+let seenJobIds = new Set();
+let newlyAddedIds = new Set();
+
 // Backend API base: on GitHub Pages the Python backend runs on Vercel,
 // everywhere else (local dev / Vercel itself) we use same-origin paths.
 const API_BASE = window.location.hostname.endsWith('github.io')
@@ -26,9 +31,46 @@ async function initApp() {
   await loadStats();
   await loadJobs();
   startLocalCountdown();
+  checkAndPromptForAppPassword();
 }
 
 // --- REST API Calls ---
+
+// Cold-start resilience: Vercel serverless functions can take ~30s to wake on
+// the first request after inactivity, and the very first fetch may fail while
+// the instance boots. Retry transient failures instead of leaving the
+// dashboard stuck on an empty state.
+let coldStartStatusTouched = false;
+
+async function fetchWithRetry(url, opts = {}, retries = 4, delayMs = 6000) {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const res = await fetch(url, opts);
+      if (res.status < 500) return res; // 4xx = real error, surface it
+      console.warn(`Server responded ${res.status} (attempt ${attempt}/${retries}) - retrying`);
+    } catch (err) {
+      console.warn(`Request failed (attempt ${attempt}/${retries}):`, err.message || err);
+    }
+    if (attempt < retries) {
+      const pill = document.getElementById('live-connection-status');
+      if (pill) {
+        pill.innerText = `Waking up server... (${attempt}/${retries})`;
+        coldStartStatusTouched = true;
+      }
+      await new Promise(r => setTimeout(r, delayMs));
+    }
+  }
+  throw new Error(`Server did not respond after ${retries} attempts`);
+}
+
+function clearColdStartStatus() {
+  if (!coldStartStatusTouched) return;
+  const pill = document.getElementById('live-connection-status');
+  if (pill && pill.innerText.startsWith('Waking up')) {
+    pill.innerText = 'Live Feed Connected';
+  }
+  coldStartStatusTouched = false;
+}
 
 async function loadJobs() {
   try {
@@ -39,23 +81,38 @@ async function loadJobs() {
     if (searchQuery.trim()) {
       url += `&q=${encodeURIComponent(searchQuery.trim())}`;
     }
-    const res = await fetch(url);
+    const res = await fetchWithRetry(url);
     const data = await res.json();
     if (data.status === 'success') {
+      clearColdStartStatus();
+      // Detect newly-arrived jobs (present now, not seen in the previous load)
+      const freshIds = new Set();
+      data.jobs.forEach(j => { if (!seenJobIds.has(j.id)) freshIds.add(j.id); });
+      if (seenJobIds.size > 0 && freshIds.size > 0) {
+        freshIds.forEach(id => newlyAddedIds.add(id));
+        // Keep the highlight for 2 minutes, then the cards look normal
+        setTimeout(() => { freshIds.forEach(id => newlyAddedIds.delete(id)); applyFiltersAndRender(); }, 120000);
+        const sample = data.jobs.find(j => freshIds.has(j.id));
+        showToast(`🆕 ${freshIds.size} new job(s) added to the dashboard!`, 'success');
+      }
+      seenJobIds = new Set(data.jobs.map(j => j.id));
       allJobs = data.jobs;
       applyFiltersAndRender();
     }
   } catch (err) {
     console.error('Failed to load jobs:', err);
+    const pill = document.getElementById('live-connection-status');
+    if (pill && coldStartStatusTouched) pill.innerText = 'Connection failed - try refresh';
     showToast('❌ Error loading jobs from server', 'error');
   }
 }
 
 async function loadStats() {
   try {
-    const res = await fetch(`${API_BASE}/api/stats`);
+    const res = await fetchWithRetry(`${API_BASE}/api/stats`);
     const data = await res.json();
     if (data.status === 'success') {
+      clearColdStartStatus();
       const stats = data.stats;
       document.getElementById('stat-total-jobs').innerText = stats.total_jobs || 0;
       document.getElementById('stat-new-jobs').innerText = stats.new_jobs || 0;
@@ -77,14 +134,22 @@ async function loadStats() {
       }
 
       if (stats.last_checked_at) {
-        const d = new Date(stats.last_checked_at);
-        document.getElementById('last-check-text').innerText = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        document.getElementById('last-check-text').innerText = formatIST(stats.last_checked_at);
       } else {
         document.getElementById('last-check-text').innerText = 'Pending initial cycle';
       }
 
       if (stats.next_check_at) {
+        // Server now returns UTC-aware ISO strings; Date parses the offset
+        // correctly regardless of the viewer's local timezone.
         nextCheckTime = new Date(stats.next_check_at).getTime();
+        // Ignore stale server timestamps: if next_check_at is already in the
+        // past (server down, cold start, old data), restart from the full
+        // interval instead of showing a stuck 00:00 that flickers.
+        if (nextCheckTime < Date.now() - 5000) {
+          const intervalMins = parseInt(stats.check_interval_mins || '15', 10);
+          nextCheckTime = Date.now() + intervalMins * 60 * 1000;
+        }
       } else {
         const intervalMins = parseInt(stats.check_interval_mins || '15', 10);
         nextCheckTime = Date.now() + intervalMins * 60 * 1000;
@@ -99,6 +164,11 @@ async function loadStats() {
 }
 
 function updatePlatformCounts(counts) {
+  // counts is {source_platform: count} from get_dashboard_stats (server-side
+  // GROUP BY over the whole jobs table), so the numbers persist across
+  // refreshes and are unaffected by the current client-side filter selection.
+  const allTab = document.querySelector('.platform-tab[data-platform="ALL"]');
+
   document.querySelectorAll('.platform-tab').forEach(tab => {
     const p = tab.getAttribute('data-platform');
     const countSpan = tab.querySelector('.tab-count') || document.createElement('span');
@@ -108,21 +178,39 @@ function updatePlatformCounts(counts) {
     countSpan.style.marginLeft = '4px';
 
     if (p === 'ALL') {
-      const total = Object.values(counts).reduce((a, b) => a + b, 0);
+      // Total = sum over every platform bucket (Direct included)
+      const known = ['LinkedIn', 'Naukri', 'Indeed', 'Glassdoor', 'Monster', 'Direct'];
+      let total = 0;
+      known.forEach(k => { total += counts[k] || 0; });
+      // Include any other platform values that might exist in the DB
+      Object.keys(counts).forEach(k => {
+        if (!known.includes(k)) total += counts[k] || 0;
+      });
       countSpan.innerText = `(${total})`;
     } else {
-      const cnt = counts[p] || 0;
+      let cnt = counts[p] || 0;
+      if (p === 'Direct') {
+        // Direct Recruiter bucket: everything not in the 5 named platforms
+        const named = ['LinkedIn', 'Naukri', 'Indeed', 'Glassdoor', 'Monster'];
+        Object.keys(counts).forEach(k => {
+          if (!named.includes(k)) cnt += counts[k] || 0;
+        });
+      }
       countSpan.innerText = `(${cnt})`;
     }
     if (!tab.querySelector('.tab-count')) {
       tab.appendChild(countSpan);
     }
   });
+
+  if (allTab) {
+    allTab.setAttribute('data-total', Object.values(counts).reduce((a, b) => a + b, 0));
+  }
 }
 
 async function loadSettings() {
   try {
-    const res = await fetch(`${API_BASE}/api/settings`);
+    const res = await fetchWithRetry(`${API_BASE}/api/settings`);
     const data = await res.json();
     if (data.status === 'success') {
       currentSettings = data.settings;
@@ -133,7 +221,22 @@ async function loadSettings() {
       document.getElementById('set-ntfy-topic').value = currentSettings.ntfy_topic || 'deepak-job-hunter-alerts';
       document.getElementById('set-desktop-notify').value = currentSettings.desktop_notify || 'true';
       document.getElementById('set-mobile-notify').value = currentSettings.mobile_notify || 'true';
-      
+
+      // Show whether an App Password is already stored (the real value is
+      // never sent to the browser).
+      const pwStatus = document.getElementById('imap-pw-status');
+      if (pwStatus) {
+        if (currentSettings.imap_password_set) {
+          pwStatus.innerHTML = '✅ A password is currently saved ' +
+            (currentSettings.imap_password_masked || '') +
+            ' — type a new one above only if you want to replace it.';
+          pwStatus.style.color = '#34d399';
+        } else {
+          pwStatus.innerHTML = '⚠️ No App Password saved yet — the inbox cannot be scanned until one is entered.';
+          pwStatus.style.color = '#fbbf24';
+        }
+      }
+
       toggleAuthFields(currentSettings.auth_mode || 'simulator');
     }
   } catch (err) {
@@ -168,6 +271,9 @@ function setupSSE() {
         } else if (payload.type === 'JOB_STATUS_UPDATED') {
           loadStats();
           loadJobs();
+        } else if (payload.type === 'JOBS_BULK_UPDATED') {
+          loadStats();
+          loadJobs();
         }
       } catch (parseErr) {
         // keepalive
@@ -196,11 +302,11 @@ function startLocalCountdown() {
     const diff = nextCheckTime - now;
 
     if (diff <= 0) {
+      // Held at zero instead of resetting: loadStats() updates nextCheckTime
+      // from the server, and the interval guard prevents flicker from stale
+      // timestamps racing a fresh one.
       document.getElementById('countdown-timer').innerText = '00:00';
       loadStats();
-      loadJobs();
-      const intervalMins = parseInt(currentSettings.check_interval_mins || '15', 10);
-      nextCheckTime = Date.now() + intervalMins * 60 * 1000;
       return;
     }
 
@@ -220,7 +326,8 @@ function matchesPlatform(job, filter) {
   const f = filter.toLowerCase();
   
   if (f === 'direct') {
-    return p === 'direct' || (!p.includes('linkedin') && !p.includes('naukri') && !p.includes('indeed') && !p.includes('glassdoor'));
+    const named = ['linkedin', 'naukri', 'indeed', 'glassdoor', 'monster'];
+    return p === 'direct' || !named.some(n => p.includes(n));
   }
   return p.includes(f) || 
          (job.email_sender && job.email_sender.toLowerCase().includes(f)) || 
@@ -268,6 +375,7 @@ function renderJobs(jobs) {
   jobs.forEach(job => {
     const isApplied = job.status === 'APPLIED';
     const appliedClass = isApplied ? 'is-applied' : '';
+    const newCardClass = newlyAddedIds.has(job.id) ? 'is-new-arrival' : '';
     const platform = job.source_platform || 'Direct';
     
     // Skills tags
@@ -299,18 +407,24 @@ function renderJobs(jobs) {
       appliedBadge = `<span class="badge-applied-red">● ALREADY APPLIED (${appliedDate})</span>`;
     }
 
+    // Temporary "NEW" badge for jobs that arrived in the latest refresh
+    const isNewArrival = newlyAddedIds.has(job.id);
+    const newBadge = isNewArrival ? '<span class="badge-new-arrival">🆕 NEW</span>' : '';
+
     // Platform Badge
     const platformBadge = `<span class="badge-platform ${platform}">${platform}</span>`;
 
-    // Direct Working Apply URL
+    // Direct Apply URL - use the REAL link extracted from the email body.
+    // (Silent search-URL fallback only prevents dead buttons in edge cases;
+    // jobs without real email links are never stored in the first place.)
     let effectiveApplyUrl = job.apply_url;
-    if (!effectiveApplyUrl || !effectiveApplyUrl.startsWith('http') || effectiveApplyUrl.includes('jk=stripe-cloud-backend')) {
+    if (!effectiveApplyUrl || !effectiveApplyUrl.startsWith('http')) {
       const query = encodeURIComponent(`${job.job_title} ${job.company_name}`);
       effectiveApplyUrl = `https://www.google.com/search?q=Apply+${query}`;
     }
 
     const applyButton = `
-      <a href="${escapeHtml(effectiveApplyUrl)}" target="_blank" rel="noopener noreferrer" class="btn btn-apply">
+      <a href="${escapeHtml(effectiveApplyUrl)}" target="_blank" rel="noopener noreferrer" class="btn btn-apply" ${job.link_source === 'email' ? 'title="Open job link from email"' : ''}>
         <span>Apply Online ↗</span>
       </a>
     `;
@@ -327,11 +441,12 @@ function renderJobs(jobs) {
     `;
 
     html += `
-      <div class="job-card ${appliedClass}" id="job-card-${job.id}">
+      <div class="job-card ${appliedClass} ${newCardClass}" id="job-card-${job.id}">
         <div class="job-card-header">
           <div class="job-title-group">
             <h2 class="job-title-text">${escapeHtml(job.job_title)}</h2>
             <div class="job-company-meta">
+              ${newBadge}
               ${platformBadge}
               <span class="company-pill">${escapeHtml(job.company_name)}</span>
               <span>•</span>
@@ -413,6 +528,72 @@ async function triggerCheckNow() {
   } catch (err) {
     console.error('Error checking emails:', err);
     showToast('Check failed. Verify network or credentials.', 'error');
+  } finally {
+    btn.innerHTML = originalText;
+    btn.disabled = false;
+  }
+}
+
+// --- Bulk Actions: Mark All Applied / Delete All ---
+
+function confirmMarkAllApplied() {
+  const newCount = allJobs.filter(j => (j.status || 'NEW').toUpperCase() !== 'APPLIED').length;
+  const label = newCount > 0 ? `${newCount} job(s)` : 'all jobs';
+  if (confirm(`✅ Mark ${label} as APPLIED?\n\nEvery job will be crossed out and flagged as applied.\nTip: use the per-card toggle if you only applied to some of them.`)) {
+    markAllApplied();
+  }
+}
+
+async function markAllApplied() {
+  const btn = document.getElementById('btn-mark-all-applied');
+  const originalText = btn.innerHTML;
+  btn.innerHTML = '<span>⏳ Marking...</span>';
+  btn.disabled = true;
+  try {
+    const res = await fetch(`${API_BASE}/api/jobs/mark-all-applied`, { method: 'POST' });
+    const data = await res.json();
+    if (data.status === 'success') {
+      showToast(`✅ ${data.message}`, 'success');
+      await loadStats();
+      await loadJobs();
+    } else {
+      showToast('Failed to mark all as applied', 'error');
+    }
+  } catch (err) {
+    console.error('Error marking all applied:', err);
+    showToast('Failed to mark all as applied', 'error');
+  } finally {
+    btn.innerHTML = originalText;
+    btn.disabled = false;
+  }
+}
+
+function confirmDeleteAll() {
+  const total = allJobs.length;
+  const label = total > 0 ? `${total} job(s)` : 'all jobs';
+  if (confirm(`⚠️ Delete ALL ${label} from the dashboard?\n\nThis permanently removes every job record. This cannot be undone.`)) {
+    deleteAllJobs();
+  }
+}
+
+async function deleteAllJobs() {
+  const btn = document.getElementById('btn-delete-all');
+  const originalText = btn.innerHTML;
+  btn.innerHTML = '<span>⏳ Deleting...</span>';
+  btn.disabled = true;
+  try {
+    const res = await fetch(`${API_BASE}/api/jobs/all`, { method: 'DELETE' });
+    const data = await res.json();
+    if (data.status === 'success') {
+      showToast(`🗑️ ${data.message}`, 'success');
+      await loadStats();
+      await loadJobs();
+    } else {
+      showToast('Failed to delete jobs', 'error');
+    }
+  } catch (err) {
+    console.error('Error deleting all jobs:', err);
+    showToast('Failed to delete jobs', 'error');
   } finally {
     btn.innerHTML = originalText;
     btn.disabled = false;
@@ -512,6 +693,7 @@ async function viewJobDetails(jobId) {
           Source: <strong style="color:#a5b4fc;">${escapeHtml(job.source_platform || 'Direct')}</strong> | 
           Sender: <code>${escapeHtml(job.email_sender || 'N/A')}</code><br>
           Subject: <em>${escapeHtml(job.email_subject || 'N/A')}</em>
+          ${job.link_source === 'email' ? ' | <span style="color:#34d399;">🔗 Direct link from email</span>' : ''}
         </div>
 
         <div class="form-group">
@@ -547,12 +729,64 @@ function closeJobModal() {
   document.getElementById('job-modal').classList.remove('active');
 }
 
+// --- IST time formatting (Asia/Kolkata) ---
+
+function formatIST(isoString) {
+  try {
+    const d = new Date(isoString);
+    if (isNaN(d.getTime())) return isoString;
+    return d.toLocaleTimeString('en-IN', {
+      timeZone: 'Asia/Kolkata',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: true
+    }) + ' IST';
+  } catch (e) {
+    return isoString;
+  }
+}
+
+// --- App Password help modal ---
+
+function openAppPasswordHelp() {
+  document.getElementById('apppw-help-modal').classList.add('active');
+}
+
+function closeAppPasswordHelp() {
+  document.getElementById('apppw-help-modal').classList.remove('active');
+}
+
+function focusAppPasswordField() {
+  const field = document.getElementById('set-imap-password');
+  if (field) field.focus();
+}
+
 function openSettingsModal() {
   document.getElementById('settings-modal').classList.add('active');
 }
 
 function closeSettingsModal() {
   document.getElementById('settings-modal').classList.remove('active');
+}
+
+// If Gmail IMAP mode is active but no App Password is stored, open Settings
+// automatically so the user can enter one.
+function checkAndPromptForAppPassword() {
+  fetch(`${API_BASE}/api/settings`)
+    .then(r => r.json())
+    .then(data => {
+      if (data.status !== 'success') return;
+      const s = data.settings;
+      const mode = s.auth_mode || 'simulator';
+      const hasPw = Boolean(s.imap_password_set);
+      if (mode === 'imap' && !hasPw) {
+        openSettingsModal();
+        toggleAuthFields('imap');
+        showToast('🔑 Enter your 16-character Gmail App Password to start scanning your inbox.', 'info');
+      }
+    })
+    .catch(() => { /* non-fatal */ });
 }
 
 function toggleAuthFields(mode) {

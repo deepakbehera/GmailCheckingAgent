@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;600&family=Inter:wght@400;500;600&family=Outfit:wght@500;600;700;800&display=swap" rel="stylesheet">
   <!-- Stylesheet -->
-  <link rel="stylesheet" href="css/style.css">
+  <link rel="stylesheet" href="/static/css/style.css">
 </head>
 <body>
   <div class="app-container">
@@ -35,6 +35,12 @@
         </button>
         <button id="btn-simulate" class="btn btn-sim" onclick="openSimulateMenu()">
           <span>🧪 Simulate Job Alerts ▾</span>
+        </button>
+        <button id="btn-mark-all-applied" class="btn btn-secondary" onclick="confirmMarkAllApplied()">
+          <span>✅ Mark All Applied</span>
+        </button>
+        <button id="btn-delete-all" class="btn btn-danger" onclick="confirmDeleteAll()">
+          <span>🗑️ Delete All Jobs</span>
         </button>
         <button class="btn btn-secondary" onclick="openMobileModal()">
           <span>📱 Mobile Sync</span>
@@ -136,6 +142,7 @@
           <button class="platform-tab" data-platform="Naukri" onclick="setPlatformFilter('Naukri', this)">Naukri</button>
           <button class="platform-tab" data-platform="Indeed" onclick="setPlatformFilter('Indeed', this)">Indeed</button>
           <button class="platform-tab" data-platform="Glassdoor" onclick="setPlatformFilter('Glassdoor', this)">Glassdoor</button>
+          <button class="platform-tab" data-platform="Monster" onclick="setPlatformFilter('Monster', this)">Monster</button>
           <button class="platform-tab" data-platform="Direct" onclick="setPlatformFilter('Direct', this)">Direct Recruiter</button>
         </div>
       </div>
@@ -198,6 +205,33 @@
     </div>
   </div>
 
+  <!-- App Password Help Modal -->
+  <div id="apppw-help-modal" class="modal-overlay">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2>🔑 Where to find your Gmail App Password</h2>
+        <button class="close-btn" onclick="closeAppPasswordHelp()">&times;</button>
+      </div>
+      <div class="modal-body">
+        <ol style="line-height:1.9; padding-left:20px; color:var(--text-main);">
+          <li>Go to your <strong>Google Account</strong>: <a href="https://myaccount.google.com/" target="_blank" rel="noopener">myaccount.google.com</a></li>
+          <li>Open <strong>Security</strong> in the left menu.</li>
+          <li>Make sure <strong>2-Step Verification is ON</strong> (App Passwords only exist with 2-Step Verification enabled).</li>
+          <li>In the Security page, search for <strong>"App passwords"</strong> — or go directly to:<br><a href="https://myaccount.google.com/apppasswords" target="_blank" rel="noopener">myaccount.google.com/apppasswords</a></li>
+          <li>Enter any name (e.g. <em>JobAgent</em>) and click <strong>Create</strong>.</li>
+          <li>Google shows a <strong>16-character password</strong> like <code>abcd efgh ijkl mnop</code>.</li>
+          <li>Copy it and paste it in the App Password field here (spaces are optional — they are removed automatically).</li>
+        </ol>
+        <p style="color:var(--text-dim); font-size:0.85rem; margin-top:12px;">
+          ⚠️ Google shows the 16 characters only once. If you lose it, generate a new one on the same page.
+        </p>
+        <div style="display:flex; justify-content:flex-end; margin-top:10px;">
+          <button class="btn btn-primary" onclick="closeAppPasswordHelp(); focusAppPasswordField();">Got it — enter password</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Settings Modal -->
   <div id="settings-modal" class="modal-overlay">
     <div class="modal-content">
@@ -226,8 +260,12 @@
         </div>
         <div id="imap-credentials-box" class="form-group" style="display:none;">
           <label>Gmail App Password (16 characters from Google Account Security)</label>
-          <input type="password" id="set-imap-password" placeholder="e.g. abcd efgh ijkl mnop">
-          <small style="color:var(--text-dim);">Generate in Google Account -> Security -> 2-Step Verification -> App Passwords.</small>
+          <div style="display:flex; gap:8px; align-items:center;">
+            <input type="password" id="set-imap-password" placeholder="e.g. abcd efgh ijkl mnop" style="flex:1;">
+            <button class="btn btn-secondary" style="white-space:nowrap;" onclick="openAppPasswordHelp()" title="Where do I find this?">❓ Where to find it</button>
+          </div>
+          <small id="imap-pw-status" style="color:var(--text-dim);">Checking saved status…</small>
+          <small style="display:block; margin-top:4px; color:var(--text-dim);">Leave empty to keep the currently saved password.</small>
         </div>
         <div class="form-group">
           <label>Gemini API Key (Optional for smart AI reasoning)</label>
@@ -307,6 +345,6 @@
   <div id="toast-container"></div>
 
   <!-- Application Script -->
-  <script src="js/app.js"></script>
+  <script src="/static/js/app.js"></script>
 </body>
 </html>
