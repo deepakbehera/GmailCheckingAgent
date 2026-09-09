@@ -2,7 +2,8 @@ import sqlite3
 import json
 import os
 import urllib.parse
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from typing import List, Dict, Any, Optional
 from config import DB_PATH, DEFAULT_TARGET_EMAIL, DEFAULT_CHECK_INTERVAL_MINS, DEFAULT_NTFY_TOPIC, DEFAULT_DESKTOP_NOTIFY, DEFAULT_MOBILE_NOTIFY, DEFAULT_AUTH_MODE
 
@@ -277,6 +278,51 @@ def init_db():
 
 # --- Job Operations ---
 
+# Dashboard freshness: job alerts older than this are ignored when the
+# dashboard lists jobs (stale postings are not worth applying to).
+MAX_JOB_AGE_DAYS = 30  # ~1 month
+
+
+def _parse_date_received(value: str) -> Optional[datetime]:
+    """Parses the mixed date formats stored in jobs.date_received.
+    Handles ISO timestamps (2026-08-26T00:20:41+00:00) and RFC 2822 email
+    Date headers (Thu, 05 Sep 2026 12:34:56 +0000). Returns None when the
+    value is missing or unparseable."""
+    if not value:
+        return None
+    text = str(value).strip()
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        pass
+    try:
+        return parsedate_to_datetime(text)
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_within_max_age(date_received: str) -> bool:
+    """True when the job's email arrived within MAX_JOB_AGE_DAYS of now.
+    Unparseable/missing dates count as fresh so nothing silently disappears."""
+    dt = _parse_date_received(date_received)
+    if dt is None:
+        return True
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=MAX_JOB_AGE_DAYS)
+    return dt >= cutoff
+
+
+def _job_sort_key(job: Dict[str, Any]):
+    """Sorts non-APPLIED jobs first, then newest email date, then highest id.
+    Done in Python because date_received mixes ISO timestamps and RFC 2822
+    email Date headers, which no single SQL expression sorts portably."""
+    dt = _parse_date_received(job.get("date_received") or "")
+    received_ts = dt.timestamp() if dt else 0.0
+    is_applied = 1 if (job.get("status") or "").upper() == "APPLIED" else 0
+    return (is_applied, -received_ts, -(job.get("id") or 0))
+
+
 def get_all_jobs(status_filter: Optional[str] = None, platform_filter: Optional[str] = None, search_query: Optional[str] = None) -> List[Dict[str, Any]]:
     conn = get_db()
     cursor = conn.cursor()
@@ -300,16 +346,18 @@ def get_all_jobs(status_filter: Optional[str] = None, platform_filter: Optional[
         query += " AND (job_title LIKE ? OR company_name LIKE ? OR location LIKE ? OR skills LIKE ? OR summary LIKE ? OR source_platform LIKE ?)"
         params.extend([search, search, search, search, search, search])
 
-    # Newest jobs first: order by the email's received date (parsed), falling
-    # back to internal id (insertion order) for identical/missing dates.
-    if IS_POSTGRES:
-        query += " ORDER BY CASE WHEN status = 'APPLIED' THEN 1 ELSE 0 END ASC, to_timestamp(date_received, 'Dy, DD Mon YYYY HH24:MI:SS') DESC NULLS LAST, id DESC"
-    else:
-        query += " ORDER BY CASE WHEN status = 'APPLIED' THEN 1 ELSE 0 END ASC, id DESC"
+    # Base order: insertion id (stable). The date-aware ordering (newest email
+    # first, APPLIED last) happens in Python below via _job_sort_key, because
+    # date_received mixes ISO and RFC 2822 formats SQL can't sort portably.
+    query += " ORDER BY id DESC"
     cursor.execute(query, params)
     rows = cursor.fetchall()
     conn.close()
-    return [dict(row) for row in rows]
+    # Ignore alerts from emails older than one month whenever the dashboard
+    # (or anything else) lists jobs.
+    jobs = [dict(row) for row in rows if _is_within_max_age(row["date_received"])]
+    jobs.sort(key=_job_sort_key)
+    return jobs
 
 def get_job_by_id(job_id: int) -> Optional[Dict[str, Any]]:
     conn = get_db()

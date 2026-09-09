@@ -117,6 +117,20 @@ _SEARCH_URL_PATTERNS = [
     "google.com/search?q=apply+",
 ]
 
+def _decode_cts_indeed(url: str) -> str:
+    """Decodes an Indeed 'cts.indeed.com/v3/<gzip+base64>' tracking redirect into
+    the real destination URL it points at. Returns '' when undecodable."""
+    try:
+        import gzip as _gzip
+        import base64 as _base64
+        tail = url.split("/v3/", 1)[1]
+        tail = urllib.parse.unquote(tail)
+        pad = tail + "=" * (-len(tail) % 4)
+        decoded = _gzip.decompress(_base64.urlsafe_b64decode(pad)).decode("utf-8", errors="replace")
+        return decoded.strip()
+    except Exception:
+        return ""
+
 def extract_real_job_links(html_body: str, text_body: str, platform: str) -> List[Dict[str, Any]]:
     """Extracts actual job posting URLs (with their anchor text) directly from the
     email body so the dashboard opens the REAL job, not a search page."""
@@ -134,6 +148,19 @@ def extract_real_job_links(html_body: str, text_body: str, platform: str) -> Lis
     for match in re.finditer(r'https?://[^\s<>"\')]+', text_body or ""):
         candidates.append((match.group(0).rstrip('.,;)"\''), ""))
 
+    # Unwrap Indeed tracking redirects so the real posting URL is what gets
+    # stored (and what the dashboard opens).
+    unwrapped = []
+    for url, anchor in candidates:
+        if url.startswith("//cts.indeed.com/v3/"):
+            url = "https:" + url
+        if url.startswith(("https://cts.indeed.com/v3/", "http://cts.indeed.com/v3/")):
+            real = _decode_cts_indeed(url)
+            unwrapped.append((real, anchor) if real.startswith("http") else (url, anchor))
+        else:
+            unwrapped.append((url, anchor))
+    candidates = unwrapped
+
     # Platform job-URL patterns: these are genuine posting links, not search pages
     platform_url_patterns = [
         r'linkedin\.com/(?:jobs/view|jobs/collections|learning/jobs|comm/jobs/view)/[^\s"\'<>]+',
@@ -141,7 +168,7 @@ def extract_real_job_links(html_body: str, text_body: str, platform: str) -> Lis
         r'naukri\.com/[a-z0-9-]+-jobs-[^\s"\'<>]+',
         r'naukri\.com/jd/job-listings?[^\s"\'<>]+',
         r'(?:my\.)?naukri\.com/(?:AL|msg)/[^\s"\'<>]+',
-        r'indeed\.com/(?:viewjob|job|cmp/[^/]+/jobs/)[^\s"\'<>]*',
+        r'indeed\.com/(?:viewjob|job|cmp/[^/]+/jobs/|rc/clk)[^\s"\'<>]*',
         r'glassdoor\.[a-z.]+/job-listing[^\s"\'<>]+',
         r'monsterindia\.com/job-search/[a-z0-9_-]+[^\s"\'<>]*',
         r'monster\.com/job-openings/[^\s"\'<>]+',
