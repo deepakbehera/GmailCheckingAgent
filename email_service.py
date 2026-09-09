@@ -21,6 +21,14 @@ logger = logging.getLogger(__name__)
 MAX_EMAILS_PER_CYCLE = 5
 IMAP_SOCKET_TIMEOUT = 20  # seconds; guards against hung IMAP connections
 
+# Truncation caps for fetched email content. Marketing emails (Glassdoor
+# digests, LinkedIn alerts) are HTML-heavy: job cards can start past position
+# 10k and tracking-wrapped hrefs alone span >1.5k chars, so a mid-tag cut
+# destroys the <a href=...> match entirely. Keep the caps generous (60k) so
+# the full job section always survives; Postgres TEXT handles this easily.
+MAX_BODY_CHARS = 20000
+MAX_HTML_CHARS = 60000
+
 def generate_working_apply_url(job_title: str, company_name: str, platform: str = "Direct") -> str:
     """Generates a guaranteed working, live search/apply URL for any role and company."""
     query = urllib.parse.quote(f"{job_title} {company_name}")
@@ -282,8 +290,8 @@ class EmailService:
                             "subject": decoded_subj.strip(),
                             "sender": sender,
                             "date_received": date_received,
-                            "body": body[:4000],
-                            "html_body": html_body[:5000]
+                            "body": body[:MAX_BODY_CHARS],
+                            "html_body": html_body[:MAX_HTML_CHARS]
                         })
 
             mail.logout()
@@ -354,8 +362,8 @@ class EmailService:
                     "subject": subject,
                     "sender": sender,
                     "date_received": datetime.now().isoformat(),
-                    "body": body_text[:6000] or snippet,
-                    "html_body": html_text[:8000]
+                    "body": body_text[:MAX_BODY_CHARS] or snippet,
+                    "html_body": html_text[:MAX_HTML_CHARS]
                 })
             return emails_list
         except Exception as e:

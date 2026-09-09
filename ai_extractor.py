@@ -95,6 +95,101 @@ def detect_platform_source(sender: str, subject: str, body: str) -> str:
             return platform
     return "Direct"
 
+# --- Click-Tracking Redirect Unwrapping ---
+# Some platforms (e.g. Glassdoor "Just in at <Company>:" weekly digests) wrap
+# EVERY link in a click-tracking redirect like
+#   https://mail8.content.glassdoor.com/ls/click?upn=<opaque-encrypted>
+# The real posting URL is only revealed by following the redirect, so we
+# resolve a capped number of them per email (in parallel) and cache results
+# across check cycles. Unresolved URLs keep their original form.
+
+TRACKING_HOST_SUFFIXES = ("content.glassdoor.com",)
+MAX_TRACKING_UNWRAPS_PER_EMAIL = 8
+_TRACKING_RESOLVE_TIMEOUT = (5, 12)  # (connect, read) seconds
+
+_tracking_url_cache: Dict[str, str] = {}
+
+
+def _host_matches_tracking(url: str) -> bool:
+    try:
+        host = urllib.parse.urlsplit(url).netloc.lower()
+    except Exception:
+        return False
+    return any(host == s or host.endswith("." + s) for s in TRACKING_HOST_SUFFIXES)
+
+
+def _resolve_tracking_url(url: str) -> str:
+    """Follows a click-tracking redirect and returns the real destination URL
+    ('' when it cannot be resolved)."""
+    try:
+        import requests
+        with requests.Session() as s:
+            s.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+            # stream=True: stop once the final URL is known (no body download)
+            resp = s.get(url, allow_redirects=True, timeout=_TRACKING_RESOLVE_TIMEOUT, stream=True)
+            final = resp.url
+            resp.close()
+            if final.startswith("http") and not _host_matches_tracking(final):
+                return final
+    except Exception as e:
+        logger.warning(f"Tracking redirect resolve failed ({url[:80]}...): {e}")
+    return ""
+
+
+def _unwrap_tracking_redirects(candidates: List[tuple]) -> List[tuple]:
+    """Replaces tracking-wrapped URLs with their real destinations (best effort).
+    Resolution runs in parallel and is capped so a check cycle stays fast."""
+    todo = []
+    for url, anchor in candidates:
+        if _host_matches_tracking(url) and url not in _tracking_url_cache:
+            todo.append(url)
+    todo = list(dict.fromkeys(todo))[:MAX_TRACKING_UNWRAPS_PER_EMAIL]
+
+    if todo:
+        try:
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                resolved = list(pool.map(_resolve_tracking_url, todo))
+            for u, real in zip(todo, resolved):
+                if real:
+                    _tracking_url_cache[u] = real
+            # Keep the cache bounded (drop oldest entries beyond 512)
+            if len(_tracking_url_cache) > 512:
+                for k in list(_tracking_url_cache.keys())[:-256]:
+                    _tracking_url_cache.pop(k, None)
+        except Exception as e:
+            logger.warning(f"Tracking unwrap pass failed: {e}")
+
+    out = []
+    for url, anchor in candidates:
+        real = _tracking_url_cache.get(url)
+        out.append((real, anchor) if real else (url, anchor))
+    return out
+
+
+def _company_from_subject(subject: str) -> str:
+    """Extracts the hiring company from Glassdoor digest subjects.
+    Handles the two weekly-digest formats:
+      \"Just in at TestVagrant: This week's employee reviews and more\"
+      \"Test Automation Engineer at Testunity and 6 more jobs in India for you. Apply Now\"
+    Glassdoor digests mention the company ONLY in the subject (the anchors
+    carry title/salary/location), so this fills the company field."""
+    if not subject:
+        return ""
+    m = re.search(r'\bjust in at\s+(.+?)\s*:', subject, re.IGNORECASE)
+    if m:
+        return m.group(1).strip()
+    m = re.search(r'\bnew jobs? at\s+(.+?)\s*[:!]', subject, re.IGNORECASE)
+    if m:
+        return m.group(1).strip()
+    # "TITLE at COMPANY and N more jobs ..." -> COMPANY (shortest match before
+    # the 'and N more jobs' marker so multi-word companies stay intact)
+    m = re.search(r'\bat\s+(.+?)\s+and\s+\d+\s*\+?\s*more\s+jobs?', subject, re.IGNORECASE)
+    if m:
+        return m.group(1).strip()
+    return ""
+
+
 # --- Real Job-Link Extraction from Email Body ---
 
 # Marketing/tracking or non-job links that must never become an apply_url
@@ -161,6 +256,10 @@ def extract_real_job_links(html_body: str, text_body: str, platform: str) -> Lis
             unwrapped.append((url, anchor))
     candidates = unwrapped
 
+    # Unwrap marketing click-tracking redirects (e.g. Glassdoor digests) so the
+    # real posting URLs can be recognized by the platform patterns below.
+    candidates = _unwrap_tracking_redirects(candidates)
+
     # Platform job-URL patterns: these are genuine posting links, not search pages
     platform_url_patterns = [
         r'linkedin\.com/(?:jobs/view|jobs/collections|learning/jobs|comm/jobs/view)/[^\s"\'<>]+',
@@ -195,6 +294,10 @@ def extract_real_job_links(html_body: str, text_body: str, platform: str) -> Lis
         # in the query string, which must NOT disqualify them.
         path_part = u_low.split('?', 1)[0]
         if any(p in path_part for p in _JUNK_URL_PATTERNS):
+            return True
+        # Glassdoor generated search/listing pages (any query string) are not
+        # single jobs: /job/jobs.htm, /jobs.htm, ...-jobs-SRCH_KO... results
+        if "glassdoor." in path_part and (re.search(r'(/job)?/jobs\.htm$', path_part) or "srch_" in path_part):
             return True
         return False
 
@@ -274,7 +377,7 @@ def parse_company_from_anchor(anchor: str) -> str:
     # marker: fall back to empty (company stays generic).
     return ""
 
-def build_jobs_from_real_links(real_links: List[Dict[str, Any]], platform: str, is_confirmation: bool) -> List[Dict[str, Any]]:
+def build_jobs_from_real_links(real_links: List[Dict[str, Any]], platform: str, is_confirmation: bool, company_hint: str = "") -> List[Dict[str, Any]]:
     """Creates one job card per real posting link found in the email body.
 
     The apply_url IS the exact link copied from the email ('Copy Link Address'),
@@ -285,6 +388,8 @@ def build_jobs_from_real_links(real_links: List[Dict[str, Any]], platform: str, 
         url = link["url"]
         anchor = titleize_anchor(link.get("anchor_text", ""))
         company = parse_company_from_anchor(anchor)
+        if not company and company_hint:
+            company = company_hint
         title = anchor
 
         # Clean the title: strip trailing location/company fragments
@@ -304,6 +409,17 @@ def build_jobs_from_real_links(real_links: List[Dict[str, Any]], platform: str, 
         title = re.sub(r'\s+\d+\.\d+\s*★.*$', '', title)
         title = re.sub(r'\s*\(Walk-In\)\s*$', '', title, flags=re.IGNORECASE)
         title = re.sub(r'\s+\d+L\s*-\s*\d+L.*$', '', title)
+        # Glassdoor anchors look like:
+        #   'TITLE CITY ₹5L - ₹10L ( Glassdoor Est. ) SKILL-CHIPS Full-time'
+        # Cut the title at the first city token when a salary (₹) follows it,
+        # then drop any '( Glassdoor ... )' block wherever it appears.
+        city_cut = re.search(
+            r'\s+(?:Bengaluru|Bangalore|Hyderabad|Pune|Mumbai|Delhi|Chennai|Kolkata|Gurgaon|Noida|NCR|Remote|Hybrid|India)\b(?=.*₹)',
+            title, re.IGNORECASE)
+        if city_cut and city_cut.start() > 3:
+            title = title[:city_cut.start()]
+        title = re.sub(r'\s*\(\s*Glassdoor[^)]*\)\s*', ' ', title, flags=re.IGNORECASE)
+        title = re.sub(r'\s{2,}', ' ', title)
         title = title.replace('&amp;', '&').strip(' -–|·,')
 
         jobs.append({
@@ -331,6 +447,9 @@ def _clean_company_name(name: str) -> str:
         return ""
     t = re.sub(r'\s+', ' ', name).strip()
     t = re.split(r'\s+(?:View|Apply|Location|Salary|Exp|Rating|Estimated)\b', t, flags=re.IGNORECASE)[0]
+    # Digest subjects bleed into heuristic company names:
+    # 'Testunity and 6 more jobs' / 'AGS Aluminum Alloy and 6 more jobs in India'
+    t = re.split(r'\s+and\s+\d+\s*\+?\s*more\s+jobs?', t, flags=re.IGNORECASE)[0]
     return t.strip(' \t-–|,')
 
 def dedupe_jobs(jobs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -377,7 +496,10 @@ class AIExtractor:
         if real_links:
             full_text = f"{subject} {sender} {body}".lower()
             is_confirmation = any(phrase in full_text for phrase in APPLICATION_CONFIRM_KEYWORDS)
-            link_jobs = build_jobs_from_real_links(real_links, platform, is_confirmation)
+            link_jobs = build_jobs_from_real_links(
+                real_links, platform, is_confirmation,
+                company_hint=_company_from_subject(subject)
+            )
 
             if api_key:
                 self._enrich_link_jobs_with_gemini(link_jobs, subject, sender, body, html_body, platform, api_key)
@@ -391,14 +513,20 @@ class AIExtractor:
             try:
                 extracted_jobs = self._analyze_multi_with_gemini(subject, sender, body, html_body, platform, api_key)
                 if extracted_jobs:
-                    self._enrich_jobs_with_real_links(extracted_jobs, html_body, body, platform)
+                    self._enrich_jobs_with_real_links(
+                        extracted_jobs, html_body, body, platform,
+                        company_hint=_company_from_subject(subject)
+                    )
                     return extracted_jobs
             except Exception as e:
                 logger.warning(f"Gemini multi-job analysis failed: {e}")
 
         jobs = self._heuristic_multi_analysis(subject, sender, body, html_body, platform)
         jobs = dedupe_jobs(jobs)
-        self._enrich_jobs_with_real_links(jobs, html_body, body, platform)
+        self._enrich_jobs_with_real_links(
+            jobs, html_body, body, platform,
+            company_hint=_company_from_subject(subject)
+        )
         return jobs
 
     def _enrich_link_jobs_with_gemini(self, jobs: List[Dict[str, Any]], subject: str, sender: str, body: str, html_body: str, platform: str, api_key: str):
@@ -474,7 +602,7 @@ One entry per input link, same order, same count ({len(jobs)}).
         except Exception as e:
             logger.warning(f"Gemini link enrichment failed (cards keep anchor-based details): {e}")
 
-    def _enrich_jobs_with_real_links(self, jobs: List[Dict[str, Any]], html_body: str, body: str, platform: str):
+    def _enrich_jobs_with_real_links(self, jobs: List[Dict[str, Any]], html_body: str, body: str, platform: str, company_hint: str = ""):
         """Matches extracted jobs to real links found in the email body.
 
         Priority: a real posting URL from the email always wins. A generated
@@ -526,6 +654,11 @@ One entry per input link, same order, same count ({len(jobs)}).
                 anchor_title = titleize_anchor(best["anchor_text"])
                 if anchor_title and (not j.get("job_title") or j.get("job_title") in ("Specialist Role", "Unknown Role")):
                     j["job_title"] = anchor_title
+            # Fill the company from the digest subject when the AI/heuristics
+            # could not determine it (Glassdoor weekly digests mention the
+            # company only in the subject line).
+            if company_hint and j.get("company_name", "") in ("", "Unknown Company", "Company from Email"):
+                j["company_name"] = company_hint
             else:
                 # No real link matched: fall back to platform search link
                 j["apply_url"] = make_working_url(
@@ -548,12 +681,13 @@ Extract ALL individual job openings mentioned in the email into a list of jobs.
 
 IMPORTANT RULES for "apply_url":
 - Use the EXACT link found in the email that points to the specific job posting (e.g. linkedin.com/jobs/view/..., indeed.com/viewjob/..., naukri.com/joblisting/..., glassdoor.com/job-listing/..., monsterindia.com job links, or the company's own careers page).
+- Glassdoor emails often wrap job links in click-tracking redirects (e.g. https://mail8.content.glassdoor.com/ls/click?upn=...). Those DO point at single job postings - treat each distinct one as a real job link and copy it exactly.
 - NEVER invent or generate a search URL. If the email has no direct posting link, leave apply_url as an empty string.
 
 Subject: {subject}
 Sender: {sender}
 Body & Links:
-{(html_body or body)[:4500]}
+{(html_body or body)[:20000]}
 
 Return a strict JSON object with this schema:
 {{

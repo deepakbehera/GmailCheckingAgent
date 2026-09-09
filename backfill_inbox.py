@@ -105,8 +105,10 @@ def fetch_batch(mail, msg_ids):
                     "subject": decode_subject(raw_subj),
                     "sender": sender,
                     "date_received": date_received,
-                    "body": body[:4000],
-                    "html_body": html_body[:5000],
+                    # Same generous caps as email_service: Glassdoor digests
+                    # carry job cards deep inside ~36k of tracking-wrapped HTML.
+                    "body": body[:20000],
+                    "html_body": html_body[:60000],
                 })
             except Exception as e:
                 print(f"    ! parse error: {e}")
