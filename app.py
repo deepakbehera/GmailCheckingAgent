@@ -5,7 +5,7 @@ import os
 from contextlib import asynccontextmanager
 from typing import Optional, Dict, Any, List
 from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
-from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
+from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -70,6 +70,17 @@ app.add_middleware(
 STATIC_DIR = BASE_DIR / "static"
 STATIC_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon_ico():
+    """Serves the favicon at the exact path browsers request, preventing a
+    harmless but noisy 404 on every dashboard load."""
+    return FileResponse(STATIC_DIR / "favicon.ico", media_type="image/x-icon")
+
+@app.get("/favicon.svg", include_in_schema=False)
+async def favicon_svg():
+    """Vector favicon referenced from the HTML <head>; scales crisply."""
+    return FileResponse(STATIC_DIR / "favicon.svg", media_type="image/svg+xml")
 
 # --- Pydantic Models ---
 

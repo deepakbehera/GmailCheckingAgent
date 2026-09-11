@@ -1,5 +1,6 @@
 import re
 import json
+import time
 import logging
 import urllib.parse
 from typing import Dict, Any, List, Optional
@@ -8,6 +9,54 @@ from database import get_setting
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# --- Gemini 429 Quota Throttle -------------------------------------------
+# The Gemini free tier allows very few requests per minute/day. When a call
+# hits RESOURCE_EXHAUSTED (429), stop calling for a cooldown window that
+# doubles with each breach (exponential backoff) and skip further calls while
+# it lasts, so a single scan cannot burn the whole day's quota on retries.
+# Degradation is graceful: link-based cards keep their anchor details and the
+# heuristic extractor handles emails without AI enrichment.
+_GEMINI_COOLDOWN_START_SECS = 30.0
+_GEMINI_COOLDOWN_MAX_SECS = 3600.0  # never back off more than an hour
+_QUOTA_STATE = {
+    "cooldown_until": 0.0,  # epoch seconds when Gemini calls may resume
+    "cooldown_secs": _GEMINI_COOLDOWN_START_SECS,  # next cooldown length
+}
+
+
+def _quota_error(e: Exception) -> bool:
+    s = str(e).lower()
+    return "429" in s or "resource_exhausted" in s or "quota" in s or "rate limit" in s
+
+
+def _gemini_quota_in_cooldown() -> bool:
+    return time.time() < _QUOTA_STATE["cooldown_until"]
+
+
+def _gemini_report_quota_error(e: Exception) -> float:
+    """Puts Gemini calls into cooldown with exponential backoff. Honors the
+    API's 'Please retry in Ns' hint when present. Returns the wait length."""
+    now = time.time()
+    wait = _QUOTA_STATE["cooldown_secs"]
+    m = re.search(r"retry\s*(?:in|after)?\s*([0-9]+(?:\.[0-9]+)?)\s*s", str(e), re.I)
+    if m:  # hint from the API ('Please retry in 43.62s'); small buffer on top
+        wait = max(wait, min(float(m.group(1)) + 2.0, _GEMINI_COOLDOWN_MAX_SECS))
+    _QUOTA_STATE["cooldown_until"] = now + wait
+    _QUOTA_STATE["cooldown_secs"] = min(wait * 2, _GEMINI_COOLDOWN_MAX_SECS)
+    logger.warning(
+        f"Gemini quota exhausted (429). Pausing AI calls for {wait:.0f}s "
+        f"(backoff doubles up to {_GEMINI_COOLDOWN_MAX_SECS:.0f}s). "
+        "Extraction continues without AI enrichment."
+    )
+    return wait
+
+
+def _gemini_report_success() -> None:
+    """A successful call resets the backoff ladder."""
+    _QUOTA_STATE["cooldown_secs"] = _GEMINI_COOLDOWN_START_SECS
+    _QUOTA_STATE["cooldown_until"] = 0.0
+# --- End Gemini 429 Quota Throttle ----------------------------------------
 
 # --- Sender-to-Platform Routing ---
 # Exact senders mapped to dashboard platform buckets.
@@ -535,6 +584,9 @@ class AIExtractor:
         apply URLs extracted from the email are NEVER modified."""
         if not jobs:
             return
+        if _gemini_quota_in_cooldown():
+            logger.info("Skipping Gemini enrichment: quota cooldown active.")
+            return
         try:
             from google import genai
             from google.genai import types
@@ -599,8 +651,12 @@ One entry per input link, same order, same count ({len(jobs)}).
                         j["skills"] = [str(s) for s in skills][:8]
                     j["ai_enriched"] = True
                 logger.info(f"Gemini enriched {len(enriched)} link-based job card(s)")
+                _gemini_report_success()
         except Exception as e:
-            logger.warning(f"Gemini link enrichment failed (cards keep anchor-based details): {e}")
+            if _quota_error(e):
+                _gemini_report_quota_error(e)
+            else:
+                logger.warning(f"Gemini link enrichment failed (cards keep anchor-based details): {e}")
 
     def _enrich_jobs_with_real_links(self, jobs: List[Dict[str, Any]], html_body: str, body: str, platform: str, company_hint: str = ""):
         """Matches extracted jobs to real links found in the email body.
@@ -669,6 +725,9 @@ One entry per input link, same order, same count ({len(jobs)}).
                 j["link_source"] = "search_fallback"
 
     def _analyze_multi_with_gemini(self, subject: str, sender: str, body: str, html_body: str, platform: str, api_key: str) -> Optional[List[Dict[str, Any]]]:
+        if _gemini_quota_in_cooldown():
+            logger.info("Skipping Gemini extraction: quota cooldown active.")
+            return None
         try:
             from google import genai
             from google.genai import types
@@ -725,10 +784,14 @@ Do NOT output backticks outside the JSON. Return only the raw JSON.
                     for j in parsed["jobs"]:
                         j["source_platform"] = platform
                         j["is_application_confirmation"] = parsed.get("is_application_confirmation", False)
+                    _gemini_report_success()
                     return parsed["jobs"]
 
         except Exception as e:
-            logger.error(f"Error in _analyze_multi_with_gemini: {e}")
+            if _quota_error(e):
+                _gemini_report_quota_error(e)
+            else:
+                logger.error(f"Error in _analyze_multi_with_gemini: {e}")
         return None
 
     def _heuristic_multi_analysis(self, subject: str, sender: str, body: str, html_body: str, platform: str) -> List[Dict[str, Any]]:
