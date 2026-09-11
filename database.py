@@ -118,6 +118,7 @@ _JOBS_COLUMNS = """
     raw_email_snippet TEXT,
     status TEXT DEFAULT 'NEW',
     applied_at TEXT,
+    checked_at TEXT,
     notes TEXT,
     applied_earlier INTEGER DEFAULT 0,
     previous_application_id INTEGER,
@@ -219,6 +220,20 @@ def _create_schema(cursor):
     else:
         try:
             cursor.execute("ALTER TABLE jobs ADD COLUMN source_platform TEXT DEFAULT 'Direct'")
+        except sqlite3.OperationalError:
+            pass
+
+    # Alter table if checked_at is missing from earlier schema (grayed-out
+    # "already checked" tracking for the dashboard).
+    if IS_POSTGRES:
+        cursor.execute("SELECT COUNT(*) AS cnt FROM information_schema.columns WHERE table_name = 'jobs' AND column_name = 'checked_at'")
+        row = cursor.fetchone()
+        col_count = row["cnt"] if hasattr(row, "get") or isinstance(row, dict) else row[0]
+        if not col_count:
+            cursor.execute("ALTER TABLE jobs ADD COLUMN checked_at TEXT")
+    else:
+        try:
+            cursor.execute("ALTER TABLE jobs ADD COLUMN checked_at TEXT")
         except sqlite3.OperationalError:
             pass
 
@@ -432,21 +447,52 @@ def update_job_status(job_id: int, status: str, notes: Optional[str] = None) -> 
     conn = get_db()
     cursor = conn.cursor()
     now_str = datetime.now().isoformat()
+    status = (status or "").upper()
     applied_at = now_str if status == "APPLIED" else None
+    # Resetting a job back to NEW (Open Role) also clears the grayed-out
+    # 'Checked' flag so the card returns to its normal, unreviewed look.
+    checked_reset = ", checked_at = NULL" if status == "NEW" else ""
 
     if notes is not None:
-        cursor.execute("""
+        cursor.execute(f"""
         UPDATE jobs 
-        SET status = ?, applied_at = COALESCE(?, applied_at), notes = ?, updated_at = ?
+        SET status = ?, applied_at = COALESCE(?, applied_at), notes = ?, updated_at = ?{checked_reset}
         WHERE id = ?
         """, (status, applied_at, notes, now_str, job_id))
     else:
-        cursor.execute("""
+        cursor.execute(f"""
         UPDATE jobs 
-        SET status = ?, applied_at = COALESCE(?, applied_at), updated_at = ?
+        SET status = ?, applied_at = COALESCE(?, applied_at), updated_at = ?{checked_reset}
         WHERE id = ?
         """, (status, applied_at, now_str, job_id))
 
+    success = cursor.rowcount > 0
+    conn.commit()
+    conn.close()
+    return success
+
+def mark_job_checked(job_id: int) -> bool:
+    """Marks a job as visually reviewed ('Checked') so the dashboard grays it
+    out. Does NOT change the NEW/APPLIED/IN_REVIEW/SEE_LATER status."""
+    conn = get_db()
+    cursor = conn.cursor()
+    now_str = datetime.now().isoformat()
+    cursor.execute("""
+    UPDATE jobs SET checked_at = ?, updated_at = ? WHERE id = ?
+    """, (now_str, now_str, job_id))
+    success = cursor.rowcount > 0
+    conn.commit()
+    conn.close()
+    return success
+
+def clear_job_checked(job_id: int) -> bool:
+    """Clears the grayed-out 'Checked' flag, restoring the card's normal look."""
+    conn = get_db()
+    cursor = conn.cursor()
+    now_str = datetime.now().isoformat()
+    cursor.execute("""
+    UPDATE jobs SET checked_at = NULL, updated_at = ? WHERE id = ?
+    """, (now_str, job_id))
     success = cursor.rowcount > 0
     conn.commit()
     conn.close()
@@ -604,6 +650,15 @@ def get_dashboard_stats() -> Dict[str, Any]:
     cursor.execute("SELECT COUNT(*) AS cnt FROM jobs WHERE status = 'NEW'")
     new_jobs = cursor.fetchone()["cnt"]
 
+    cursor.execute("SELECT COUNT(*) AS cnt FROM jobs WHERE status = 'IN_REVIEW'")
+    in_review_jobs = cursor.fetchone()["cnt"]
+
+    cursor.execute("SELECT COUNT(*) AS cnt FROM jobs WHERE status = 'SEE_LATER'")
+    see_later_jobs = cursor.fetchone()["cnt"]
+
+    cursor.execute("SELECT COUNT(*) AS cnt FROM jobs WHERE checked_at IS NOT NULL")
+    checked_jobs = cursor.fetchone()["cnt"]
+
     cursor.execute("SELECT COUNT(*) AS cnt FROM jobs WHERE applied_earlier = 1")
     repeat_companies = cursor.fetchone()["cnt"]
 
@@ -627,6 +682,9 @@ def get_dashboard_stats() -> Dict[str, Any]:
         "total_jobs": total_jobs,
         "applied_jobs": applied_jobs,
         "new_jobs": new_jobs,
+        "in_review_jobs": in_review_jobs,
+        "see_later_jobs": see_later_jobs,
+        "checked_jobs": checked_jobs,
         "repeat_companies": repeat_companies,
         "total_emails_scanned": total_emails_scanned,
         "platform_counts": platform_counts,

@@ -15,6 +15,8 @@ from database import (
     get_all_jobs,
     get_job_by_id,
     update_job_status,
+    mark_job_checked,
+    clear_job_checked,
     delete_job,
     get_dashboard_stats,
     get_recent_email_logs,
@@ -75,6 +77,10 @@ class StatusUpdateRequest(BaseModel):
     status: str
     notes: Optional[str] = None
 
+# Allowed workflow statuses a user can set from the dashboard dropdown.
+# 'APPLIED' can also be set programmatically by the confirmation-email matcher.
+VALID_JOB_STATUSES = {"NEW", "APPLIED", "IN_REVIEW", "SEE_LATER"}
+
 class SettingsUpdateRequest(BaseModel):
     target_email: Optional[str] = None
     check_interval_mins: Optional[str] = None
@@ -131,15 +137,38 @@ async def api_get_job(job_id: int):
 
 @app.post("/api/jobs/{job_id}/status")
 async def api_update_status(job_id: int, req: StatusUpdateRequest):
-    success = update_job_status(job_id, req.status.upper(), req.notes)
+    new_status = req.status.upper()
+    if new_status not in VALID_JOB_STATUSES:
+        raise HTTPException(status_code=422, detail=f"Invalid status '{req.status}'. Allowed: {sorted(VALID_JOB_STATUSES)}")
+
+    success = update_job_status(job_id, new_status, req.notes)
     if not success:
         raise HTTPException(status_code=404, detail="Job not found or could not be updated")
     
     await job_scheduler.broadcast_event("JOB_STATUS_UPDATED", {
         "job_id": job_id,
-        "new_status": req.status.upper()
+        "new_status": new_status
     })
-    return {"status": "success", "message": f"Job #{job_id} status updated to {req.status.upper()}"}
+    return {"status": "success", "message": f"Job #{job_id} status updated to {new_status}"}
+
+@app.post("/api/jobs/{job_id}/checked")
+async def api_mark_job_checked(job_id: int):
+    """Flags a job as visually reviewed ('Checked') so the dashboard grays it
+    out — the user knows they already looked at it. Status is untouched."""
+    success = mark_job_checked(job_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Job not found")
+    await job_scheduler.broadcast_event("JOB_STATUS_UPDATED", {"job_id": job_id, "checked": True})
+    return {"status": "success", "message": f"Job #{job_id} marked as checked"}
+
+@app.delete("/api/jobs/{job_id}/checked")
+async def api_clear_job_checked(job_id: int):
+    """Removes the grayed-out 'Checked' flag, restoring the card's normal look."""
+    success = clear_job_checked(job_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Job not found")
+    await job_scheduler.broadcast_event("JOB_STATUS_UPDATED", {"job_id": job_id, "checked": False})
+    return {"status": "success", "message": f"Job #{job_id} unchecked"}
 
 @app.delete("/api/jobs/{job_id}")
 async def api_delete_job(job_id: int):

@@ -24,10 +24,16 @@
   --applied-red-bg: rgba(239, 68, 68, 0.12);
   --applied-red-border: rgba(239, 68, 68, 0.35);
 
+  --checked-gray: rgba(148, 163, 184, 0.6);
+  --checked-border: rgba(148, 163, 184, 0.35);
+  --review-amber: #f59e0b;
+  --see-later-cyan: #06b6d4;
+
   --platform-linkedin: #0a66c2;
   --platform-naukri: #0073e6;
   --platform-indeed: #2164f3;
   --platform-glassdoor: #0caa41;
+  --platform-monster: #6d28d9;
   
   --font-sans: 'Outfit', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   --font-mono: 'Fira Code', monospace;
@@ -261,6 +267,20 @@ header.app-header {
   background: var(--applied-red) !important;
   color: #fff !important;
   border-color: #b91c1c !important;
+  box-shadow: 0 0 12px var(--applied-red-glow);
+}
+
+.btn-danger {
+  background: rgba(239, 68, 68, 0.15);
+  color: #fca5a5;
+  border: 1px solid rgba(239, 68, 68, 0.35);
+}
+
+.btn-danger:hover {
+  background: var(--applied-red);
+  color: #fff;
+  border-color: #b91c1c;
+  transform: translateY(-1px);
   box-shadow: 0 0 12px var(--applied-red-glow);
 }
 
@@ -571,6 +591,184 @@ header.app-header {
   100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
 }
 
+/* ==========================================================================
+   GRAYED-OUT "CHECKED" STATE (job already reviewed by the user)
+   ========================================================================== */
+.job-card.is-checked {
+  background: rgba(18, 22, 30, 0.82);
+  border: 1px solid var(--checked-border);
+  box-shadow: none;
+}
+
+.job-card.is-checked .job-title-text {
+  text-decoration: line-through;
+  text-decoration-color: rgba(148, 163, 184, 0.85);
+  text-decoration-thickness: 2px;
+  color: var(--checked-gray);
+  opacity: 0.8;
+}
+
+.job-card.is-checked .job-summary-text {
+  opacity: 0.38;
+}
+
+.job-card.is-checked .skills-container,
+.job-card.is-checked .job-company-meta {
+  opacity: 0.45;
+}
+
+.job-card.is-checked:hover {
+  background: rgba(24, 29, 38, 0.9);
+}
+
+/* Clickable badge to undo the grayed-out state */
+.badge-checked {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: rgba(148, 163, 184, 0.15);
+  color: #cbd5e1;
+  border: 1px solid var(--checked-border);
+  font-weight: 700;
+  font-size: 0.72rem;
+  padding: 3px 9px;
+  border-radius: 999px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  cursor: pointer;
+  transition: var(--transition);
+}
+
+.badge-checked:hover {
+  background: rgba(148, 163, 184, 0.3);
+  color: #fff;
+}
+
+/* In Review (amber) & See Later (cyan) card accents */
+.job-card.is-in-review { border-color: rgba(245, 158, 11, 0.45); }
+.job-card.is-see-later { border-color: rgba(6, 182, 212, 0.45); }
+
+.badge-status-in-review {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: rgba(245, 158, 11, 0.15);
+  color: #fcd34d;
+  border: 1px solid rgba(245, 158, 11, 0.4);
+  font-weight: 700;
+  font-size: 0.72rem;
+  padding: 3px 9px;
+  border-radius: 999px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.badge-status-see-later {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: rgba(6, 182, 212, 0.15);
+  color: #67e8f9;
+  border: 1px solid rgba(6, 182, 212, 0.4);
+  font-weight: 700;
+  font-size: 0.72rem;
+  padding: 3px 9px;
+  border-radius: 999px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+/* Workflow status dropdown on each job card */
+.status-dropdown {
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  color: var(--text-main);
+  font-family: inherit;
+  font-size: 0.8rem;
+  font-weight: 600;
+  padding: 6px 8px;
+  cursor: pointer;
+  transition: var(--transition);
+}
+
+.status-dropdown:hover {
+  border-color: rgba(255, 255, 255, 0.25);
+}
+
+.status-dropdown:focus {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: 0 0 8px var(--primary-glow);
+}
+
+.status-dropdown option {
+  background: var(--bg-secondary);
+  color: var(--text-main);
+}
+
+/* Per-job delete button */
+.btn-delete-job {
+  background: transparent;
+  color: var(--text-dim);
+  border: 1px solid transparent;
+  font-size: 0.85rem;
+  padding: 6px 8px;
+}
+
+.btn-delete-job:hover {
+  background: rgba(239, 68, 68, 0.15);
+  color: #f87171;
+  border-color: rgba(239, 68, 68, 0.35);
+}
+
+/* Stat cards for the new statuses */
+.stat-card.review::after { background: var(--review-amber); }
+.stat-card.see-later::after { background: var(--see-later-cyan); }
+.stat-card.checked::after { background: #94a3b8; }
+.stat-card.review .stat-icon { background: rgba(245, 158, 11, 0.15); color: #fbbf24; }
+.stat-card.see-later .stat-icon { background: rgba(6, 182, 212, 0.15); color: #22d3ee; }
+.stat-card.checked .stat-icon { background: rgba(148, 163, 184, 0.15); color: #cbd5e1; }
+
+/* Filter tabs matching the new statuses */
+.filter-tab.active-in-review {
+  background: var(--review-amber) !important;
+  color: #fff !important;
+}
+
+.filter-tab.active-see-later {
+  background: var(--see-later-cyan) !important;
+  color: #fff !important;
+}
+
+/* Temporary "NEW" highlight for jobs that arrived in the latest refresh */
+.badge-new-arrival {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: rgba(16, 185, 129, 0.2);
+  color: #6ee7b7;
+  border: 1px solid rgba(16, 185, 129, 0.45);
+  font-weight: 800;
+  font-size: 0.72rem;
+  padding: 2px 9px;
+  border-radius: 999px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  animation: pulse-new 1.6s infinite;
+}
+
+@keyframes pulse-new {
+  0% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.55); }
+  70% { box-shadow: 0 0 0 7px rgba(16, 185, 129, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
+}
+
+.job-card.is-new-arrival {
+  border-color: rgba(16, 185, 129, 0.5);
+  box-shadow: 0 0 18px rgba(16, 185, 129, 0.18);
+}
+
 /* Platform Source Badges */
 .badge-platform {
   display: inline-flex;
@@ -588,6 +786,7 @@ header.app-header {
 .badge-platform.Naukri { background: rgba(0, 115, 230, 0.2); color: #38bdf8; border: 1px solid rgba(0, 115, 230, 0.4); }
 .badge-platform.Indeed { background: rgba(33, 100, 243, 0.2); color: #818cf8; border: 1px solid rgba(33, 100, 243, 0.4); }
 .badge-platform.Glassdoor { background: rgba(12, 170, 65, 0.2); color: #4ade80; border: 1px solid rgba(12, 170, 65, 0.4); }
+.badge-platform.Monster { background: rgba(109, 40, 217, 0.25); color: #c4b5fd; border: 1px solid rgba(109, 40, 217, 0.45); }
 .badge-platform.Direct { background: rgba(168, 85, 247, 0.2); color: #c084fc; border: 1px solid rgba(168, 85, 247, 0.4); }
 
 /* Top Card Bar */

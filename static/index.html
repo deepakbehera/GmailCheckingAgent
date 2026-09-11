@@ -117,6 +117,27 @@
           <div id="stat-repeat-companies" class="stat-number">0</div>
         </div>
       </div>
+      <div class="stat-card review">
+        <div class="stat-icon">🔎</div>
+        <div class="stat-content">
+          <h3>In Review</h3>
+          <div id="stat-in-review-jobs" class="stat-number">0</div>
+        </div>
+      </div>
+      <div class="stat-card see-later">
+        <div class="stat-icon">⏰</div>
+        <div class="stat-content">
+          <h3>See Later</h3>
+          <div id="stat-see-later-jobs" class="stat-number">0</div>
+        </div>
+      </div>
+      <div class="stat-card checked">
+        <div class="stat-icon">👀</div>
+        <div class="stat-content">
+          <h3>Already Checked</h3>
+          <div id="stat-checked-jobs" class="stat-number">0</div>
+        </div>
+      </div>
     </section>
 
     <!-- Search & Filter Toolbar -->
@@ -129,6 +150,8 @@
         <div class="filter-tabs">
           <button class="filter-tab active" data-status="ALL" onclick="setFilter('ALL', this)">All Postings</button>
           <button class="filter-tab" data-status="NEW" onclick="setFilter('NEW', this)">Open Roles</button>
+          <button class="filter-tab" data-status="IN_REVIEW" onclick="setFilter('IN_REVIEW', this)">🔎 In Review</button>
+          <button class="filter-tab" data-status="SEE_LATER" onclick="setFilter('SEE_LATER', this)">⏰ See Later</button>
           <button class="filter-tab" data-status="APPLIED" onclick="setFilter('APPLIED', this)">Already Applied (Strike/Red)</button>
         </div>
       </div>

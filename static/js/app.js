@@ -118,6 +118,9 @@ async function loadStats() {
       document.getElementById('stat-new-jobs').innerText = stats.new_jobs || 0;
       document.getElementById('stat-applied-jobs').innerText = stats.applied_jobs || 0;
       document.getElementById('stat-repeat-companies').innerText = stats.repeat_companies || 0;
+      document.getElementById('stat-in-review-jobs').innerText = stats.in_review_jobs || 0;
+      document.getElementById('stat-see-later-jobs').innerText = stats.see_later_jobs || 0;
+      document.getElementById('stat-checked-jobs').innerText = stats.checked_jobs || 0;
       
       if (stats.target_email) {
         document.getElementById('header-target-email').innerText = stats.target_email;
@@ -373,8 +376,14 @@ function renderJobs(jobs) {
 
   let html = '';
   jobs.forEach(job => {
-    const isApplied = job.status === 'APPLIED';
+    const status = (job.status || 'NEW').toUpperCase();
+    const isApplied = status === 'APPLIED';
+    // 'Checked' = user already looked at this job (clicked Apply/Details or
+    // flagged manually). The card grays out but the status stays independent.
+    const isChecked = Boolean(job.checked_at) && !isApplied;
     const appliedClass = isApplied ? 'is-applied' : '';
+    const checkedClass = isChecked ? 'is-checked' : '';
+    const statusClass = status === 'IN_REVIEW' ? 'is-in-review' : (status === 'SEE_LATER' ? 'is-see-later' : '');
     const newCardClass = newlyAddedIds.has(job.id) ? 'is-new-arrival' : '';
     const platform = job.source_platform || 'Direct';
     
@@ -407,6 +416,17 @@ function renderJobs(jobs) {
       appliedBadge = `<span class="badge-applied-red">● ALREADY APPLIED (${appliedDate})</span>`;
     }
 
+    // Status / Checked badges for the non-applied workflow states
+    let statusBadge = '';
+    if (status === 'IN_REVIEW') {
+      statusBadge = `<span class="badge-status-in-review">🔎 IN REVIEW</span>`;
+    } else if (status === 'SEE_LATER') {
+      statusBadge = `<span class="badge-status-see-later">⏰ SEE LATER</span>`;
+    } else if (isChecked) {
+      const checkedDate = job.checked_at ? new Date(job.checked_at).toLocaleDateString() : '';
+      statusBadge = `<span class="badge-checked" onclick="uncheckJob(${job.id})" title="Click to clear the grayed-out checked state">✓ CHECKED${checkedDate ? ' (' + checkedDate + ')' : ''}</span>`;
+    }
+
     // Temporary "NEW" badge for jobs that arrived in the latest refresh
     const isNewArrival = newlyAddedIds.has(job.id);
     const newBadge = isNewArrival ? '<span class="badge-new-arrival">🆕 NEW</span>' : '';
@@ -423,10 +443,29 @@ function renderJobs(jobs) {
       effectiveApplyUrl = `https://www.google.com/search?q=Apply+${query}`;
     }
 
+    // Apply button: clicking it flags the job as Checked (grayed out) so the
+    // user knows this posting was already looked at.
     const applyButton = `
-      <a href="${escapeHtml(effectiveApplyUrl)}" target="_blank" rel="noopener noreferrer" class="btn btn-apply" ${job.link_source === 'email' ? 'title="Open job link from email"' : ''}>
+      <a href="${escapeHtml(effectiveApplyUrl)}" target="_blank" rel="noopener noreferrer" class="btn btn-apply" onclick="markJobChecked(${job.id})" ${job.link_source === 'email' ? 'title="Open job link from email"' : ''}>
         <span>Apply Online ↗</span>
       </a>
+    `;
+
+    // Compact workflow-status dropdown: Open / In Review / See Later / Applied
+    const statusDropdown = `
+      <select class="status-dropdown" onchange="changeJobStatus(${job.id}, this.value)" title="Change job status" aria-label="Job status">
+        <option value="NEW" ${status === 'NEW' ? 'selected' : ''}>🔵 Open Role</option>
+        <option value="IN_REVIEW" ${status === 'IN_REVIEW' ? 'selected' : ''}>🔎 In Review</option>
+        <option value="SEE_LATER" ${status === 'SEE_LATER' ? 'selected' : ''}>⏰ See Later</option>
+        <option value="APPLIED" ${isApplied ? 'selected' : ''}>✅ Applied</option>
+      </select>
+    `;
+
+    // Per-job delete (used after the job has been checked/reviewed)
+    const deleteButton = `
+      <button class="btn btn-delete-job" onclick="confirmDeleteJob(${job.id})" title="Delete this job" aria-label="Delete job">
+        <span>🗑️</span>
+      </button>
     `;
 
     // Applied Toggle Button
@@ -441,7 +480,7 @@ function renderJobs(jobs) {
     `;
 
     html += `
-      <div class="job-card ${appliedClass} ${newCardClass}" id="job-card-${job.id}">
+      <div class="job-card ${appliedClass} ${checkedClass} ${statusClass} ${newCardClass}" id="job-card-${job.id}">
         <div class="job-card-header">
           <div class="job-title-group">
             <h2 class="job-title-text">${escapeHtml(job.job_title)}</h2>
@@ -454,6 +493,7 @@ function renderJobs(jobs) {
               ${job.salary && job.salary !== 'Not specified' ? `<span class="badge badge-salary">${escapeHtml(job.salary)}</span>` : ''}
               ${job.match_score ? `<span class="badge badge-match">${job.match_score}% Match</span>` : ''}
               ${appliedBadge}
+              ${statusBadge}
             </div>
           </div>
         </div>
@@ -471,11 +511,13 @@ function renderJobs(jobs) {
             <span>Received: ${escapeHtml(job.date_received || 'Recently')}</span>
           </div>
           <div class="action-buttons">
+            ${statusDropdown}
             <button class="btn btn-secondary" style="font-size: 0.82rem; padding: 6px 12px;" onclick="viewJobDetails(${job.id})">
               <span>🔍 Details</span>
             </button>
             ${appliedToggleBtn}
             ${applyButton}
+            ${deleteButton}
           </div>
         </div>
       </div>
@@ -485,10 +527,11 @@ function renderJobs(jobs) {
   container.innerHTML = html;
 }
 
-// --- Toggle Applied Status (Strike & Red Marker) ---
+// --- Job Status / Checked / Delete Actions ---
 
-async function toggleAppliedStatus(jobId, currentStatus) {
-  const newStatus = currentStatus === 'APPLIED' ? 'NEW' : 'APPLIED';
+// Workflow status change from the per-card dropdown.
+// Selecting 'Open Role' also clears the grayed-out Checked flag (server-side).
+async function changeJobStatus(jobId, newStatus) {
   try {
     const res = await fetch(`${API_BASE}/api/jobs/${jobId}/status`, {
       method: 'POST',
@@ -497,17 +540,78 @@ async function toggleAppliedStatus(jobId, currentStatus) {
     });
     const data = await res.json();
     if (data.status === 'success') {
-      if (newStatus === 'APPLIED') {
-        showToast('🎯 Marked as Applied! Struck through and highlighted in red.', 'success');
-      } else {
-        showToast('🔄 Status reverted to Open Role.', 'info');
-      }
+      const messages = {
+        'APPLIED': '🎯 Marked as Applied! Struck through and highlighted in red.',
+        'IN_REVIEW': '🔎 Marked as In Review. Find it under the In Review tab.',
+        'SEE_LATER': '⏰ Saved as See Later. Find it under the See Later tab.',
+        'NEW': '🔄 Status reset to Open Role (grayed-out cleared).'
+      };
+      showToast(messages[newStatus] || 'Status updated.', 'info');
       await loadStats();
       await loadJobs();
+    } else {
+      showToast(data.detail || 'Failed to update status', 'error');
+      await loadJobs(); // re-render to restore the actual saved value
     }
   } catch (err) {
     console.error('Error updating job status:', err);
     showToast('Failed to update status', 'error');
+  }
+}
+
+// Kept for the existing "Mark as Applied" toggle button.
+async function toggleAppliedStatus(jobId, currentStatus) {
+  const newStatus = currentStatus === 'APPLIED' ? 'NEW' : 'APPLIED';
+  await changeJobStatus(jobId, newStatus);
+}
+
+// Flags the job as visually reviewed; the card grays out immediately.
+// Called when the user clicks 'Apply Online' or opens 'Details'.
+async function markJobChecked(jobId, silent = true) {
+  try {
+    const res = await fetch(`${API_BASE}/api/jobs/${jobId}/checked`, { method: 'POST' });
+    const data = await res.json();
+    if (data.status === 'success') {
+      const job = allJobs.find(j => j.id === jobId);
+      if (job) {
+        job.checked_at = new Date().toISOString();
+        applyFiltersAndRender(); // instant gray-out without a full refetch
+      }
+      if (!silent) showToast('✓ Marked as checked (grayed out).', 'info');
+    }
+  } catch (err) {
+    console.error('Error marking job as checked:', err);
+  }
+}
+
+// Per-job delete with confirmation (used after checking/reviewing a job).
+function confirmDeleteJob(jobId) {
+  const job = allJobs.find(j => j.id === jobId);
+  const label = job ? `"${job.job_title}" at "${job.company_name}"` : `Job #${jobId}`;
+  if (confirm(`🗑️ Delete ${label}?\n\nThis permanently removes the job from the dashboard. This cannot be undone.`)) {
+    deleteSingleJob(jobId);
+  }
+}
+
+async function deleteSingleJob(jobId) {
+  const card = document.getElementById(`job-card-${jobId}`);
+  if (card) card.style.opacity = '0.4';
+  try {
+    const res = await fetch(`${API_BASE}/api/jobs/${jobId}`, { method: 'DELETE' });
+    const data = await res.json();
+    if (data.status === 'success') {
+      showToast(`🗑️ ${data.message}`, 'success');
+      seenJobIds.delete(jobId);
+      await loadStats();
+      await loadJobs();
+    } else {
+      if (card) card.style.opacity = '1';
+      showToast(data.detail || 'Failed to delete job', 'error');
+    }
+  } catch (err) {
+    if (card) card.style.opacity = '1';
+    console.error('Error deleting job:', err);
+    showToast('Failed to delete job', 'error');
   }
 }
 
@@ -630,13 +734,36 @@ async function simulateSpecificJob(source) {
 
 function setFilter(status, el) {
   currentFilter = status;
-  document.querySelectorAll('.filter-tab').forEach(t => t.classList.remove('active', 'active-applied'));
+  document.querySelectorAll('.filter-tab').forEach(t => t.classList.remove('active', 'active-applied', 'active-in-review', 'active-see-later'));
   if (status === 'APPLIED') {
     el.classList.add('active', 'active-applied');
+  } else if (status === 'IN_REVIEW') {
+    el.classList.add('active', 'active-in-review');
+  } else if (status === 'SEE_LATER') {
+    el.classList.add('active', 'active-see-later');
   } else {
     el.classList.add('active');
   }
   applyFiltersAndRender();
+}
+
+// Manually clear the grayed-out Checked flag from a card.
+async function uncheckJob(jobId) {
+  try {
+    const res = await fetch(`${API_BASE}/api/jobs/${jobId}/checked`, { method: 'DELETE' });
+    const data = await res.json();
+    if (data.status === 'success') {
+      const job = allJobs.find(j => j.id === jobId);
+      if (job) {
+        delete job.checked_at;
+        applyFiltersAndRender();
+      }
+      showToast('🔄 Checked flag cleared.', 'info');
+    }
+  } catch (err) {
+    console.error('Error clearing checked flag:', err);
+    showToast('Failed to clear checked flag', 'error');
+  }
 }
 
 function setPlatformFilter(platform, el) {
@@ -666,6 +793,9 @@ async function viewJobDetails(jobId) {
       const history = data.company_history || [];
 
       document.getElementById('modal-job-title').innerText = job.job_title;
+
+      // Opening the details counts as having reviewed the job: gray it out.
+      await markJobChecked(jobId);
 
       let historyHtml = '';
       if (history.length > 0) {
@@ -711,6 +841,16 @@ ${escapeHtml(job.raw_email_snippet || 'No email snippet available.')}
         </div>
 
         ${historyHtml}
+
+        <div class="form-group">
+          <label>Job Status</label>
+          <select class="status-dropdown" id="modal-status-select" onchange="changeJobStatus(${job.id}, this.value)">
+            <option value="NEW" ${((job.status || 'NEW').toUpperCase() === 'NEW') ? 'selected' : ''}>🔵 Open Role</option>
+            <option value="IN_REVIEW" ${((job.status || '').toUpperCase() === 'IN_REVIEW') ? 'selected' : ''}>🔎 In Review</option>
+            <option value="SEE_LATER" ${((job.status || '').toUpperCase() === 'SEE_LATER') ? 'selected' : ''}>⏰ See Later</option>
+            <option value="APPLIED" ${((job.status || '').toUpperCase() === 'APPLIED') ? 'selected' : ''}>✅ Applied</option>
+          </select>
+        </div>
 
         <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 14px;">
           <a href="${escapeHtml(effectiveApplyUrl)}" target="_blank" class="btn btn-apply">Apply Online ↗</a>
