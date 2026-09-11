@@ -74,13 +74,13 @@ function clearColdStartStatus() {
 
 async function loadJobs() {
   try {
-    let url = `${API_BASE}/api/jobs?status=${currentFilter}`;
-    if (currentPlatform !== 'ALL') {
-      url += `&platform=${encodeURIComponent(currentPlatform)}`;
-    }
-    if (searchQuery.trim()) {
-      url += `&q=${encodeURIComponent(searchQuery.trim())}`;
-    }
+    // Always load ALL recent jobs and filter client-side (applyFiltersAndRender).
+    // Fetching with server-side status/platform filters can race a slow server
+    // (AI quota retry storms, cold starts) and blank the list mid-browse right
+    // after an action like 'Apply Online'. Client-side filtering keeps every
+    // card visible irrespective of job status and keeps the filter tabs
+    // consistent even if a background refetch fails or returns slowly.
+    const url = `${API_BASE}/api/jobs?status=ALL`;
     const res = await fetchWithRetry(url);
     const data = await res.json();
     if (data.status === 'success') {
@@ -126,15 +126,19 @@ async function loadStats() {
         document.getElementById('header-target-email').innerText = stats.target_email;
       }
 
-      if (stats.public_url) {
-        currentPublicUrl = stats.public_url;
-        document.getElementById('display-public-url').innerText = stats.public_url;
-        document.getElementById('display-public-url').style.color = '#34d399';
-      } else {
-        // If tunnel not yet registered, use window.location
-        const fallbackUrl = window.location.origin;
-        document.getElementById('display-public-url').innerText = fallbackUrl;
-      }
+      // Public URL banner: on any deployed host the dashboard's own origin IS
+      // the public URL (e.g. https://gmail-checking-agent.vercel.app). Never
+      // show a cloudflared tunnel URL stored in the DB by an old local run —
+      // it is stale and unreachable outside that machine. Tunnel URLs are only
+      // meaningful while viewing the dashboard on localhost.
+      const host = window.location.hostname;
+      const isLocalHost = host === 'localhost' || host === '127.0.0.1';
+      const publicUrl = (!isLocalHost || !stats.public_url)
+        ? window.location.origin
+        : stats.public_url; // local run: fresh cloudflared tunnel for phone access
+      currentPublicUrl = publicUrl;
+      document.getElementById('display-public-url').innerText = publicUrl;
+      document.getElementById('display-public-url').style.color = '#34d399';
 
       if (stats.last_checked_at) {
         document.getElementById('last-check-text').innerText = formatIST(stats.last_checked_at);
