@@ -44,3 +44,4 @@ backfill_run.log
 
 # Resumable rebuild script state (local runtime data)
 rebuild_checkpoint.txt
+ui_shots/
