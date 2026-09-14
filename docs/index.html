@@ -39,6 +39,9 @@
         <button id="btn-mark-all-applied" class="btn btn-secondary" onclick="confirmMarkAllApplied()">
           <span>✅ Mark All Applied</span>
         </button>
+        <button id="btn-dedupe" class="btn btn-secondary" onclick="dedupeJobs()">
+          <span>🧹 Remove Duplicates</span>
+        </button>
         <button id="btn-delete-all" class="btn btn-danger" onclick="confirmDeleteAll()">
           <span>🗑️ Delete All Jobs</span>
         </button>
@@ -184,14 +187,14 @@
 
   <!-- Simulate Alert Selector Modal -->
   <div id="sim-modal" class="modal-overlay">
-    <div class="modal-content" style="max-width: 480px;">
+    <div class="modal-content" style="max-width: 520px;">
       <div class="modal-header">
         <h2>🧪 Select Job Alert Source to Simulate</h2>
         <button class="close-btn" onclick="closeSimModal()">&times;</button>
       </div>
       <div class="modal-body">
         <p style="font-size: 0.88rem; color: var(--text-muted);">
-          Choose a simulated multi-job email digest to test the extraction and dashboard:
+          Choose a simulated multi-job email digest to test the extraction and dashboard — or create a fully custom job card below:
         </p>
         <div style="display: flex; flex-direction: column; gap: 10px;">
           <button class="btn btn-secondary" style="justify-content: flex-start;" onclick="simulateSpecificJob('LinkedIn')">
@@ -211,6 +214,85 @@
             <span>Simulate Glassdoor Recommendations (2 roles)</span>
           </button>
         </div>
+
+        <div style="border-top: 1px solid var(--border-color); margin: 16px 0 12px;"></div>
+
+        <div style="display:flex; align-items:center; justify-content:space-between; cursor:pointer;" onclick="toggleCustomJobForm()">
+          <strong style="font-size:0.92rem;">➕ Add a Custom Job (your own fields)</strong>
+          <span id="custom-job-caret" style="transition: transform 0.2s;">▾</span>
+        </div>
+
+        <form id="custom-job-form" onsubmit="submitCustomJob(event)" style="display:none; margin-top:12px;">
+          <div class="form-group">
+            <label>Job Title *</label>
+            <input type="text" id="custom-job-title" placeholder="e.g. Senior Backend Engineer">
+          </div>
+          <div class="form-group">
+            <label>Company *</label>
+            <input type="text" id="custom-job-company" placeholder="e.g. Stripe">
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label>Location</label>
+              <input type="text" id="custom-job-location" placeholder="e.g. Bengaluru / Remote">
+            </div>
+            <div class="form-group">
+              <label>Source Platform</label>
+              <input type="text" id="custom-job-platform" list="custom-platform-options" placeholder="Direct">
+              <datalist id="custom-platform-options">
+                <option>Direct</option>
+                <option>LinkedIn</option>
+                <option>Naukri</option>
+                <option>Indeed</option>
+                <option>Glassdoor</option>
+                <option>Monster</option>
+              </datalist>
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label>Job Type</label>
+              <input type="text" id="custom-job-type" list="custom-jobtype-options" placeholder="Full-time">
+              <datalist id="custom-jobtype-options">
+                <option>Full-time</option>
+                <option>Part-time</option>
+                <option>Contract</option>
+                <option>Internship</option>
+              </datalist>
+            </div>
+            <div class="form-group">
+              <label>Experience Level</label>
+              <input type="text" id="custom-job-exp" list="custom-exp-options" placeholder="Not specified">
+              <datalist id="custom-exp-options">
+                <option>Entry</option>
+                <option>Mid</option>
+                <option>Mid-Senior</option>
+                <option>Senior</option>
+                <option>Lead</option>
+              </datalist>
+            </div>
+          </div>
+          <div class="form-group">
+            <label>Salary</label>
+            <input type="text" id="custom-job-salary" placeholder="e.g. ₹40 - ₹60 LPA or $150k - $200k">
+          </div>
+          <div class="form-group">
+            <label>Skills (comma-separated)</label>
+            <input type="text" id="custom-job-skills" placeholder="e.g. Python, FastAPI, AWS">
+          </div>
+          <div class="form-group">
+            <label>Apply URL (optional)</label>
+            <input type="url" id="custom-job-url" placeholder="Leave blank to auto-generate a working search link">
+          </div>
+          <div class="form-group">
+            <label>Summary</label>
+            <textarea id="custom-job-summary" rows="2" placeholder="One-line job description"></textarea>
+          </div>
+          <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:10px;">
+            <button type="button" class="btn btn-secondary" onclick="resetCustomJobForm()">Clear</button>
+            <button type="submit" class="btn btn-primary">✨ Add Custom Job</button>
+          </div>
+        </form>
       </div>
     </div>
   </div>

@@ -734,6 +734,105 @@ async function simulateSpecificJob(source) {
   }
 }
 
+// --- Custom Job Form (Simulate modal) ---
+
+function toggleCustomJobForm() {
+  const form = document.getElementById('custom-job-form');
+  const caret = document.getElementById('custom-job-caret');
+  const show = form.style.display === 'none';
+  form.style.display = show ? 'block' : 'none';
+  caret.style.transform = show ? 'rotate(180deg)' : 'rotate(0deg)';
+}
+
+function resetCustomJobForm() {
+  ['custom-job-title', 'custom-job-company', 'custom-job-location', 'custom-job-platform',
+   'custom-job-type', 'custom-job-exp', 'custom-job-salary', 'custom-job-skills',
+   'custom-job-url', 'custom-job-summary'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.value = '';
+  });
+}
+
+async function submitCustomJob(event) {
+  event.preventDefault();
+  const title = document.getElementById('custom-job-title').value.trim();
+  const company = document.getElementById('custom-job-company').value.trim();
+  if (!title || !company) {
+    showToast('Job Title and Company are required.', 'error');
+    return;
+  }
+
+  const payload = {
+    job_title: title,
+    company_name: company,
+    location: document.getElementById('custom-job-location').value.trim() || null,
+    source_platform: document.getElementById('custom-job-platform').value.trim() || null,
+    job_type: document.getElementById('custom-job-type').value.trim() || null,
+    experience_level: document.getElementById('custom-job-exp').value.trim() || null,
+    salary: document.getElementById('custom-job-salary').value.trim() || null,
+    skills: document.getElementById('custom-job-skills').value.trim() || null,
+    apply_url: document.getElementById('custom-job-url').value.trim() || null,
+    summary: document.getElementById('custom-job-summary').value.trim() || null
+  };
+
+  const btn = event.submitter || event.target.querySelector('button[type="submit"]');
+  const originalText = btn.innerHTML;
+  btn.innerHTML = '<span>⏳ Adding...</span>';
+  btn.disabled = true;
+
+  try {
+    const res = await fetch(`${API_BASE}/api/simulate-custom-job`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (data.status === 'success') {
+      showToast(data.duplicate ? `⚠️ ${data.message}` : data.message, data.duplicate ? 'info' : 'success');
+      if (!data.duplicate) {
+        resetCustomJobForm();
+        closeSimModal();
+      }
+      await loadStats();
+      await loadJobs();
+    } else {
+      showToast(data.detail || 'Failed to add custom job', 'error');
+    }
+  } catch (err) {
+    console.error('Error adding custom job:', err);
+    showToast('Failed to add custom job', 'error');
+  } finally {
+    btn.innerHTML = originalText;
+    btn.disabled = false;
+  }
+}
+
+// --- Duplicate Cleanup ---
+
+async function dedupeJobs() {
+  const btn = document.getElementById('btn-dedupe');
+  const originalText = btn.innerHTML;
+  btn.innerHTML = '<span>⏳ Removing duplicates...</span>';
+  btn.disabled = true;
+  try {
+    const res = await fetch(`${API_BASE}/api/jobs/dedupe`, { method: 'POST' });
+    const data = await res.json();
+    if (data.status === 'success') {
+      showToast(data.deleted > 0 ? `🧹 ${data.message}` : `✅ ${data.message}`, 'success');
+      await loadStats();
+      await loadJobs();
+    } else {
+      showToast('Failed to remove duplicates', 'error');
+    }
+  } catch (err) {
+    console.error('Error removing duplicates:', err);
+    showToast('Failed to remove duplicates', 'error');
+  } finally {
+    btn.innerHTML = originalText;
+    btn.disabled = false;
+  }
+}
+
 // --- Filters and Search ---
 
 function setFilter(status, el) {

@@ -12,6 +12,7 @@ from database import (
     get_setting,
     update_settings,
     find_previous_applications_for_company,
+    find_existing_duplicate,
     update_job_status
 )
 from email_service import email_service
@@ -113,6 +114,17 @@ class JobHunterScheduler:
                 
                 # Check previous applications for this company/role
                 dup_check = job_matcher.check_duplicate_and_history(company, title)
+
+                # Skip posting jobs that were already posted before: same
+                # normalized apply URL, or same company + similar title. This
+                # keeps the dashboard free of re-sent alert copies.
+                existing_dup = find_existing_duplicate(item.get("apply_url", ""), company, title)
+                if existing_dup:
+                    logger.info(
+                        f"Skipping duplicate job posting: '{title}' @ {company} "
+                        f"(already posted as job #{existing_dup['id']})"
+                    )
+                    continue
 
                 job_record = {
                     "message_id": f"{msg_id}_{len(new_jobs_found)}",

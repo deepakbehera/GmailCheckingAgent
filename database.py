@@ -1,6 +1,7 @@
 import sqlite3
 import json
 import os
+import re
 import urllib.parse
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
@@ -585,6 +586,208 @@ def is_message_already_processed(message_id: str) -> bool:
     row = cursor.fetchone()
     conn.close()
     return row is not None
+
+# --- Duplicate Posting Detection -------------------------------------------
+
+# URL query parameters that only exist for tracking/analytics. Two apply links
+# that differ only in these are the SAME posting (e.g. LinkedIn view URLs come
+# with ?trackingId=... that changes per alert email).
+_TRACKING_PARAM_KEYS = {
+    "trk", "trkinfo", "trackingid", "utm_source", "utm_medium", "utm_campaign",
+    "utm_term", "utm_content", "utm_id", "gclid", "fbclid", "ref", "ref_src",
+    "refid", "eid", "lipi", "midtoken", "originationentityid", "originalsubdomain",
+    "original_referer", "mc_cid", "mc_eid", "ck_subscriber_id", "from", "qd",
+}
+
+# Canonical job-id extractors: when a URL embeds the platform's numeric job ID,
+# that ID is the posting's true identity. The same job re-sent in later alert
+# emails gets a different trackingId/refId each time but always the same ID.
+_JOB_ID_PATTERNS = [
+    (re.compile(r"linkedin\.com/(?:comm/)?jobs/view/(\d{6,})"), "linkedin"),
+    (re.compile(r"indeed\.com/(?:m/)?viewjob\?(?:.*&)?jk=([a-f0-9]{10,})"), "indeed"),
+    (re.compile(r"indeed\.com/(?:.*/)?rc/clk/(?:.*/)?(?:dl\?)?(?:.*&)?jk=([a-f0-9]{10,})"), "indeed"),
+    (re.compile(r"naukri\.com/job-listings-[a-z0-9-]*?(\d{6,})(?:$|[?&/])"), "naukri"),
+    (re.compile(r"hirist\.tech/(?:j|one-click-apply).*[?&]jobid=(\d{4,})", re.IGNORECASE), "hirist"),
+]
+
+
+def _canonical_job_id(combined: str) -> Optional[str]:
+    """Extracts a stable platform job id from a normalized URL, or None.
+
+    Also tries a percent-decoded copy of the URL: tracking redirects like
+    `postoffice.hirist.tech/CL0/https%3A%2F%2Fwww.hirist.tech%2F...%3FjobId=123`
+    embed the real link URL-encoded, so the raw string never shows `jobid=`."""
+    candidates = [combined]
+    try:
+        decoded = urllib.parse.unquote(combined)
+        if decoded != combined:
+            candidates.append(decoded)
+    except Exception:
+        pass
+    for candidate in candidates:
+        for pattern, platform in _JOB_ID_PATTERNS:
+            m = pattern.search(candidate)
+            if m:
+                return f"jobid:{platform}:{m.group(1)}"
+    return None
+
+
+def normalize_apply_url(url: Optional[str]) -> str:
+    """Normalizes a job apply URL for duplicate comparison.
+
+    Strips scheme, host prefixes (www/mobile), HTML entities that leak into
+    hrefs (e.g. &amp;), tracking query params and the trailing fragment.
+
+    For well-known job platforms the embedded numeric job ID becomes the whole
+    key (e.g. `jobid:linkedin:4464320821`), so the same posting re-sent with a
+    fresh trackingId in every alert email still compares equal."""
+    if not url:
+        return ""
+    text = str(url).strip().replace("&amp;", "&").replace("&#38;", "&")
+    try:
+        parts = urllib.parse.urlsplit(text)
+        if not parts.netloc:
+            # Not a real absolute URL (relative junk, plain text) - compare raw
+            return text.lower().rstrip("/")
+        host = parts.netloc.lower()
+        for prefix in ("www.", "mobile.", "m."):
+            if host.startswith(prefix):
+                host = host[len(prefix):]
+        path = parts.path.rstrip("/").lower()
+        try:
+            qs = urllib.parse.parse_qsl(parts.query, keep_blank_values=False)
+        except ValueError:
+            qs = []
+        kept = [(k, v) for k, v in qs if k.lower() not in _TRACKING_PARAM_KEYS]
+        kept.sort()
+        clean_query = urllib.parse.urlencode(kept)
+        combined = f"{host}{path}{'?' + clean_query if clean_query else ''}"
+        job_id = _canonical_job_id(combined)
+        if job_id:
+            return job_id
+        return combined
+    except Exception:
+        return text.lower()
+
+
+def _title_tokens(title: Optional[str]) -> set:
+    """Lowercase word tokens of a job title with common filler words removed."""
+    stopwords = {"the", "a", "an", "at", "of", "for", "and", "with", "in", "to", "on", "job", "opening", "position", "role"}
+    tokens = re.findall(r"[a-z0-9#+]+", (title or "").lower())
+    return {t for t in tokens if t not in stopwords}
+
+
+def _titles_similar(title_a: Optional[str], title_b: Optional[str]) -> bool:
+    """True when two job titles are close enough to call the same posting.
+    Requires either a strong token overlap (>=60% shared, both non-trivial)
+    or one title being contained in the other."""
+    ta, tb = _title_tokens(title_a), _title_tokens(title_b)
+    if not ta or not tb:
+        return False
+    if ta <= tb or tb <= ta:
+        return True
+    overlap = len(ta & tb)
+    smaller = min(len(ta), len(tb))
+    return smaller > 0 and (overlap / smaller) >= 0.6
+
+
+def _norm_company(name: Optional[str]) -> str:
+    return re.sub(r"[^a-z0-9]", "", (name or "").lower())
+
+
+def find_existing_duplicate(apply_url: Optional[str], company_name: Optional[str], job_title: Optional[str], exclude_id: Optional[int] = None) -> Optional[Dict[str, Any]]:
+    """Returns an already-posted job matching this posting, or None.
+
+    A match is ANY existing job whose apply URL normalizes to the same link,
+    OR whose company name matches AND whose job title is similar (catches the
+    same vacancy re-sent from a different platform/link)."""
+    norm_url = normalize_apply_url(apply_url)
+    norm_company = _norm_company(company_name)
+
+    conn = get_db()
+    cursor = conn.cursor()
+    try:
+        if norm_url:
+            cursor.execute("SELECT * FROM jobs WHERE apply_url IS NOT NULL AND apply_url != ''")
+            rows = cursor.fetchall()
+        else:
+            rows = []
+
+        # URL-only matching can scan the whole table; when no URL is present
+        # fall back to the company-indexed company scan below.
+        if norm_url:
+            for row in rows:
+                job = dict(row)
+                if exclude_id is not None and job.get("id") == exclude_id:
+                    continue
+                if normalize_apply_url(job.get("apply_url")) == norm_url:
+                    return job
+
+        if norm_company:
+            cursor.execute("SELECT * FROM jobs WHERE LOWER(company_name) LIKE ?", (f"%{company_name.strip().lower()}%",))
+            for row in cursor.fetchall():
+                job = dict(row)
+                if exclude_id is not None and job.get("id") == exclude_id:
+                    continue
+                if _norm_company(job.get("company_name")) != norm_company:
+                    continue
+                if _titles_similar(job.get("job_title"), job_title):
+                    return job
+        return None
+    finally:
+        conn.close()
+
+
+def dedupe_existing_jobs() -> int:
+    """One-time cleanup: deletes duplicate job rows that were already posted.
+
+    Keeps the OLDEST row of each duplicate group (it carries the original
+    email metadata) and removes newer copies. Returns the number deleted."""
+    conn = get_db()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT * FROM jobs ORDER BY id ASC")
+        rows = [dict(r) for r in cursor.fetchall()]
+
+        seen_urls = {}
+        seen_companies = []
+        to_delete = []
+        for job in rows:
+            jid = job.get("id")
+            norm_url = normalize_apply_url(job.get("apply_url"))
+            norm_company = _norm_company(job.get("company_name"))
+            title = job.get("job_title")
+
+            dup_of = None
+            if norm_url and norm_url in seen_urls:
+                dup_of = seen_urls[norm_url]
+            elif norm_company:
+                for prior in seen_companies:
+                    if prior["norm_company"] == norm_company and _titles_similar(prior["title"], title):
+                        dup_of = prior["id"]
+                        break
+
+            if dup_of is not None:
+                to_delete.append(jid)
+                # A duplicate row may still hold a fuller URL than the kept one
+                if norm_url and norm_url not in seen_urls:
+                    seen_urls[norm_url] = dup_of
+                continue
+
+            if norm_url:
+                seen_urls[norm_url] = jid
+            if norm_company:
+                seen_companies.append({"id": jid, "norm_company": norm_company, "title": title})
+
+        deleted = 0
+        for jid in to_delete:
+            cursor.execute("DELETE FROM jobs WHERE id = ?", (jid,))
+            deleted += 1
+        conn.commit()
+        return deleted
+    finally:
+        conn.close()
+
 
 def find_previous_applications_for_company(company_name: str, exclude_id: Optional[int] = None) -> List[Dict[str, Any]]:
     if not company_name:

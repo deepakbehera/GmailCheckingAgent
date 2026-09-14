@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 from typing import Optional, Dict, Any, List
 from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
@@ -26,11 +27,13 @@ from database import (
     get_setting,
     insert_job,
     mark_all_jobs_applied,
-    delete_all_jobs
+    delete_all_jobs,
+    dedupe_existing_jobs,
+    find_existing_duplicate
 )
 from scheduler import job_scheduler
 from notification_service import notification_service
-from email_service import email_service
+from email_service import email_service, generate_working_apply_url
 from ai_extractor import ai_extractor
 from job_matcher import job_matcher
 from tunnel_service import tunnel_service
@@ -102,6 +105,22 @@ class SettingsUpdateRequest(BaseModel):
     gemini_api_key: Optional[str] = None
     imap_password: Optional[str] = None
     public_url: Optional[str] = None
+
+
+class CustomJobRequest(BaseModel):
+    """Payload for the 'Custom Job' simulate form on the dashboard.
+    Only job_title and company_name are required; everything else is optional
+    and gets a sensible default."""
+    job_title: str
+    company_name: str
+    location: Optional[str] = None
+    job_type: Optional[str] = None
+    apply_url: Optional[str] = None
+    salary: Optional[str] = None
+    skills: Optional[Any] = None  # list OR comma-separated string
+    experience_level: Optional[str] = None
+    summary: Optional[str] = None
+    source_platform: Optional[str] = None
 
 # --- REST Endpoints ---
 
@@ -267,8 +286,19 @@ async def api_simulate_job(source: Optional[str] = None):
         company = item.get("company_name", "Unknown Company")
         title = item.get("job_title", "Specialist Role")
         platform = item.get("source_platform", "Direct")
-        
+
         dup_check = job_matcher.check_duplicate_and_history(company, title)
+
+        # Same duplicate rule as the live scheduler: never re-post a job that
+        # is already on the dashboard (same normalized apply URL, or same
+        # company + similar title).
+        existing_dup = find_existing_duplicate(item.get("apply_url", ""), company, title)
+        if existing_dup:
+            logger.info(
+                f"Simulator skipped duplicate job posting: '{title}' @ {company} "
+                f"(already posted as job #{existing_dup['id']})"
+            )
+            continue
 
         job_record = {
             "message_id": f"{msg_id}_{len(new_jobs_list)}",
@@ -305,10 +335,97 @@ async def api_simulate_job(source: Optional[str] = None):
     for j in new_jobs_list:
         await job_scheduler.broadcast_event("NEW_JOB_RECEIVED", {"job": j})
 
+    skipped = len(extracted_jobs) - len(new_jobs_list)
+    message = f"Processed {len(new_jobs_list)} job openings from {sender}."
+    if skipped > 0:
+        message += f" ({skipped} duplicate(s) already on the dashboard were skipped.)"
+
     return {
         "status": "success",
-        "message": f"Processed {len(new_jobs_list)} job openings from {sender}!",
+        "message": message,
         "jobs": new_jobs_list
+    }
+
+
+@app.post("/api/simulate-custom-job")
+async def api_simulate_custom_job(req: CustomJobRequest):
+    """Creates ONE job card from user-supplied fields (Custom Job form in the
+    Simulate modal). Goes through the same duplicate filter as real alerts."""
+    title = (req.job_title or "").strip() or "Unknown Role"
+    company = (req.company_name or "").strip() or "Unknown Company"
+    platform = (req.source_platform or "").strip() or "Direct"
+
+    # A working search URL is generated when the user leaves Apply URL blank.
+    apply_url = (req.apply_url or "").strip()
+    if not apply_url.startswith("http"):
+        apply_url = generate_working_apply_url(title, company, platform)
+
+    dup_check = job_matcher.check_duplicate_and_history(company, title)
+    existing_dup = find_existing_duplicate(apply_url, company, title)
+    if existing_dup:
+        return {
+            "status": "success",
+            "duplicate": True,
+            "message": f"⚠️ Not added: this job is already on the dashboard (job #{existing_dup['id']} '{existing_dup['job_title']}' @ {existing_dup['company_name']}).",
+            "jobs": []
+        }
+
+    skills = req.skills
+    if isinstance(skills, str):
+        skills = [s.strip() for s in skills.split(",") if s.strip()]
+    elif not isinstance(skills, list):
+        skills = []
+
+    msg_id = f"custom_{datetime.now(timezone.utc).timestamp()}"
+    job_record = {
+        "message_id": msg_id,
+        "email_subject": f"Manual job entry: {title} @ {company}",
+        "email_sender": "custom@dashboard.local",
+        "source_platform": platform,
+        "date_received": datetime.now(timezone.utc).isoformat(),
+        "job_title": title,
+        "company_name": company,
+        "location": (req.location or "").strip() or "Remote / Unspecified",
+        "job_type": (req.job_type or "").strip() or "Full-time",
+        "apply_url": apply_url,
+        "salary": (req.salary or "").strip() or "Not specified",
+        "skills": skills,
+        "experience_level": (req.experience_level or "").strip() or "Not specified",
+        "summary": (req.summary or "").strip(),
+        "raw_email_snippet": "Manually added via the dashboard Custom Job form.",
+        "status": "NEW",
+        "applied_earlier": dup_check["applied_earlier"],
+        "previous_application_id": dup_check["previous_application_id"],
+        "previous_applied_date": dup_check["previous_applied_date"],
+        "previous_job_title": dup_check["previous_job_title"],
+        "match_score": 100
+    }
+
+    job_id = insert_job(job_record)
+    job_record["id"] = job_id
+
+    notification_service.notify_check_result(1, [job_record])
+    await job_scheduler.broadcast_event("NEW_JOB_RECEIVED", {"job": job_record})
+
+    return {
+        "status": "success",
+        "duplicate": False,
+        "message": f"✨ Custom job added: '{title}' @ {company} (#{job_id}).",
+        "jobs": [job_record]
+    }
+
+
+@app.post("/api/jobs/dedupe")
+async def api_dedupe_jobs():
+    """One-click cleanup: removes already-posted duplicates, keeping the oldest
+    copy of each job. Returns how many rows were deleted."""
+    deleted = dedupe_existing_jobs()
+    if deleted:
+        await job_scheduler.broadcast_event("JOBS_BULK_UPDATED", {"action": "dedupe", "count": deleted})
+    return {
+        "status": "success",
+        "message": f"Removed {deleted} duplicate job(s)." if deleted else "No duplicates found — dashboard is clean.",
+        "deleted": deleted
     }
 
 @app.get("/api/stats")
@@ -318,7 +435,11 @@ async def api_get_stats():
     stats["check_interval_mins"] = get_setting("check_interval_mins", "15")
     stats["target_email"] = get_setting("target_email", "deepak.gvit@gmail.com")
     stats["auth_mode"] = get_setting("auth_mode", "simulator")
-    stats["public_url"] = get_setting("public_url", "")
+    # Never surface a stale tunnel URL (e.g. an old trycloudflare.com link in
+    # the settings table). The banner, QR code and test-notification button
+    # all show the effective URL: production URL on Vercel, fresh tunnel or
+    # localhost when running locally.
+    stats["public_url"] = notification_service.get_effective_dashboard_url()
     return {"status": "success", "stats": stats}
 
 @app.get("/api/logs")

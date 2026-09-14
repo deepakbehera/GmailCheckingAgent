@@ -2,12 +2,14 @@ import subprocess
 import requests
 import json
 import logging
+import os
 import platform
 import urllib.parse
 from email.header import Header
 from typing import Optional, Dict, Any, List
-from config import DEFAULT_NTFY_TOPIC, PORT
+from config import DEFAULT_NTFY_TOPIC, PORT, PUBLIC_DASHBOARD_URL
 from database import get_setting
+from tunnel_service import tunnel_service
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -29,11 +31,39 @@ class NotificationService:
         pass
 
     def get_effective_dashboard_url(self) -> str:
-        """Returns public tunnel URL if active, otherwise local address."""
+        """Returns the URL used for the ntfy 'Open Dashboard' action button.
+
+        Priority:
+          1. The production deployment URL (PUBLIC_DASHBOARD_URL) — always used
+             so phone notifications never point at a dead cloudflared tunnel.
+          2. When running locally AND a fresh tunnel URL exists in settings
+             (this machine started cloudflared this session), that URL.
+          3. Localhost otherwise.
+
+        Only a trycloudflare.com / loca.lt URL that was written during THIS
+        process lifetime is considered live; anything else in the settings
+        table is stale and would 530 on the phone."""
         pub_url = get_setting("public_url", "").strip()
-        if pub_url and pub_url.startswith("http"):
+        if self._tunnel_url_is_fresh(pub_url):
             return pub_url
+        if os.getenv("VERCEL"):
+            return PUBLIC_DASHBOARD_URL
         return f"http://localhost:{PORT}"
+
+    @staticmethod
+    def _tunnel_url_is_fresh(url: str) -> bool:
+        """True only when `url` is a tunnel URL set by THIS process (the
+        tunnel_service writes it right after the tunnel comes up) and the
+        tunnel subprocess is still alive."""
+        if not url or not url.startswith("http"):
+            return False
+        host = urllib.parse.urlsplit(url).netloc.lower()
+        is_tunnel_host = host.endswith(".trycloudflare.com") or host.endswith(".loca.lt")
+        process_alive = bool(tunnel_service.process and tunnel_service.process.poll() is None)
+        return bool(tunnel_service.is_running and process_alive
+                    and tunnel_service.public_url
+                    and tunnel_service.public_url.strip().rstrip("/") == url.strip().rstrip("/")
+                    and is_tunnel_host)
 
     def send_desktop_notification(self, title: str, message: str, url: Optional[str] = None):
         """Sends a native Windows desktop toast/balloon notification."""

@@ -1,7 +1,17 @@
 import unittest
 import os
+import sys
 import uuid
 import json
+import tempfile
+
+# Isolate the test database BEFORE any project import: a temp SQLite file and
+# no DATABASE_URL, so running the suite never touches local dashboard data or
+# the production Neon database.
+os.environ["JOB_AGENT_DB_PATH"] = os.path.join(tempfile.gettempdir(), f"gmail_jobs_test_{uuid.uuid4().hex}.db")
+os.environ.pop("DATABASE_URL", None)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 from database import (
     init_db,
     insert_job,
@@ -10,6 +20,9 @@ from database import (
     update_job_status,
     get_dashboard_stats,
     find_previous_applications_for_company,
+    find_existing_duplicate,
+    dedupe_existing_jobs,
+    normalize_apply_url,
     get_setting,
     update_settings
 )
@@ -88,7 +101,7 @@ class TestGmailJobAgent(unittest.TestCase):
     def test_04_rest_api_platform_filtering(self):
         """Test REST API platform filters and multi-job simulation."""
         client = TestClient(app)
-        
+
         # Test simulate with specific platform
         resp_sim = client.post("/api/simulate-job?source=Indeed")
         self.assertEqual(resp_sim.status_code, 200)
@@ -102,6 +115,105 @@ class TestGmailJobAgent(unittest.TestCase):
         jobs = resp_filter.json()["jobs"]
         for j in jobs:
             self.assertEqual(j["source_platform"], "LinkedIn")
+
+    def test_05_duplicate_detection_url_tracking_params(self):
+        """URLs differing only by tracking params / scheme / www compare equal."""
+        base = "https://www.linkedin.com/jobs/view/123456?trackingId=abc123&trk=some-pulse"
+        same = "http://linkedin.com/jobs/view/123456/"
+        different = "https://www.linkedin.com/jobs/view/999999"
+        self.assertEqual(normalize_apply_url(base), normalize_apply_url(same))
+        self.assertNotEqual(normalize_apply_url(base), normalize_apply_url(different))
+
+    def test_06_duplicate_detection_company_title(self):
+        """Same company + similar title is flagged even when the URL differs."""
+        marker = f"dupco{uuid.uuid4().hex[:8]}"
+        job_id = insert_job({
+            "message_id": f"test_dup_{uuid.uuid4()}",
+            "email_subject": "Job Alert",
+            "email_sender": "alerts@example.com",
+            "source_platform": "LinkedIn",
+            "job_title": "Senior Backend Engineer",
+            "company_name": marker,
+            "apply_url": f"https://example.com/jobs/{uuid.uuid4()}",
+            "status": "NEW"
+        })
+        dup = find_existing_duplicate(
+            apply_url="https://example.com/jobs/different-link",
+            company_name=marker,
+            job_title="Senior Backend  Engineer"  # extra space, still similar
+        )
+        self.assertIsNotNone(dup)
+        self.assertEqual(dup["id"], job_id)
+
+        # Different title at the same company is NOT a duplicate
+        dup_other = find_existing_duplicate(
+            apply_url="https://example.com/jobs/other",
+            company_name=marker,
+            job_title="Graphic Designer Intern"
+        )
+        self.assertIsNone(dup_other)
+
+    def test_07_dedupe_existing_jobs(self):
+        """dedupe_existing_jobs removes later copies, keeping the oldest row."""
+        marker = f"dedupco{uuid.uuid4().hex[:8]}"
+        url = f"https://example.com/jobs/view/98765?trackingId=xyz"
+        id1 = insert_job({
+            "message_id": f"test_dedupe1_{uuid.uuid4()}",
+            "email_subject": "Job Alert",
+            "email_sender": "alerts@example.com",
+            "source_platform": "LinkedIn",
+            "job_title": "Platform Engineer",
+            "company_name": marker,
+            "apply_url": url,
+            "status": "NEW"
+        })
+        id2 = insert_job({
+            "message_id": f"test_dedupe2_{uuid.uuid4()}",
+            "email_subject": "Job Alert (re-send)",
+            "email_sender": "alerts@example.com",
+            "source_platform": "Indeed",
+            "job_title": "Platform  Engineer",  # similar title, different URL
+            "company_name": marker,
+            "apply_url": "https://indeed.com/viewjob?jk=repost123",
+            "status": "NEW"
+        })
+        self.assertNotEqual(id1, id2)
+
+        deleted = dedupe_existing_jobs()
+        self.assertGreaterEqual(deleted, 1)
+
+        self.assertIsNotNone(get_job_by_id(id1), "oldest duplicate row must be kept")
+        self.assertIsNone(get_job_by_id(id2), "newer duplicate row must be deleted")
+
+    def test_08_custom_job_endpoint(self):
+        """POST /api/simulate-custom-job creates one job with defaults applied."""
+        client = TestClient(app)
+        marker = f"Custom Co {uuid.uuid4().hex[:6]}"
+        resp = client.post("/api/simulate-custom-job", json={
+            "job_title": "QA Automation Lead",
+            "company_name": marker,
+            "skills": "Selenium, Pytest, API testing",
+            "location": "Pune"
+        })
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(data["status"], "success")
+        self.assertFalse(data.get("duplicate", False))
+        self.assertEqual(len(data["jobs"]), 1)
+        job = data["jobs"][0]
+        self.assertTrue(job["apply_url"].startswith("http"), "blank apply URL must be auto-generated")
+        self.assertEqual(job["source_platform"], "Direct")
+        self.assertIn("Selenium", job["skills"] if isinstance(job["skills"], str) else ",".join(job["skills"]))
+
+        # Posting the exact same custom job again is blocked as a duplicate
+        resp2 = client.post("/api/simulate-custom-job", json={
+            "job_title": "QA Automation Lead",
+            "company_name": marker
+        })
+        data2 = resp2.json()
+        self.assertEqual(data2["status"], "success")
+        self.assertTrue(data2.get("duplicate"))
+        self.assertEqual(len(data2["jobs"]), 0)
 
 if __name__ == "__main__":
     unittest.main()
