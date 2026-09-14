@@ -42,6 +42,9 @@ class TestGmailJobAgent(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         init_db()
+        # Never spam the real phone/desktop during tests: the notification
+        # service reads these settings per call from the (isolated) test DB.
+        update_settings({"mobile_notify": "false", "desktop_notify": "false"})
 
     def test_01_database_operations_and_platform(self):
         """Test inserting and updating job records with source platform in SQLite."""
