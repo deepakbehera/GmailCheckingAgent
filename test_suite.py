@@ -26,7 +26,13 @@ from database import (
     get_setting,
     update_settings
 )
-from ai_extractor import ai_extractor
+from ai_extractor import (
+    ai_extractor,
+    _company_from_subject,
+    parse_company_from_anchor,
+    _looks_like_company,
+    _subject_hint_is_first_link_only,
+)
 from job_matcher import job_matcher
 from email_service import email_service
 from fastapi.testclient import TestClient
@@ -214,6 +220,66 @@ class TestGmailJobAgent(unittest.TestCase):
         self.assertEqual(data2["status"], "success")
         self.assertTrue(data2.get("duplicate"))
         self.assertEqual(len(data2["jobs"]), 0)
+
+    def test_09_company_from_subject_formats(self):
+        """Subject-derived company hints cover the real alert-email formats."""
+        cases = {
+            "Deepak, your application was sent to Kanerika Inc": "Kanerika Inc",
+            "Just in at TestVagrant: This week's employee reviews and more": "TestVagrant",
+            "New jobs at Testunity! Apply to 5 new positions": "Testunity",
+            "Test Automation Engineer at Testunity and 6 more jobs in India for you. Apply Now": "Testunity",
+            "Senior QA Engineer at Lister Digital. 12 more senior software quality assurance engineer jobs in Bengaluru, Karnataka": "Lister Digital",
+            "New jobs similar to AI Test Architect at WSA \u2013 Wonderful Sound for All": "WSA \u2013 Wonderful Sound for All",
+        }
+        for subject, expected in cases.items():
+            self.assertEqual(_company_from_subject(subject), expected, f"subject: {subject}")
+        # No company signal -> empty, never a placeholder
+        self.assertEqual(_company_from_subject("Your weekly job digest is here"), "")
+
+    def test_10_anchor_company_junk_rejection(self):
+        """Anchor tails that are tech/skill fragments must not become companies."""
+        junk_anchors = [
+            "Senior Software Engineer - .Net",
+            "Senior Software Quality Assurance Engineer - Manual QA",
+            "Senior Designer - DFMA, CAD Software",
+            "Automation - Test Architect",
+            "TechOps-DE-AI-Staff-Assistant-GDSN02 - Company from Email",
+        ]
+        for anchor in junk_anchors:
+            self.assertEqual(parse_company_from_anchor(anchor), "", f"anchor: {anchor}")
+
+        good_anchors = {
+            "KPMG India Python Ai Testing KPMG India \u00b7 Bengaluru, Karnataka, India": "KPMG India",
+            "GoDaddy Senior Network Security Analyst GoDaddy \u00b7 Hyderabad": "GoDaddy",
+        }
+        for anchor, expected in good_anchors.items():
+            self.assertEqual(parse_company_from_anchor(anchor), expected, f"anchor: {anchor}")
+
+        # Placeholder fragments can never validate as companies
+        for frag in (".Net", "Manual QA", "Company from Email", "GoDaddy"):
+            self.assertEqual(_looks_like_company(frag), frag == "GoDaddy", f"frag: {frag}")
+
+    def test_11_similar_jobs_hint_first_link_only(self):
+        """Multi-job digests ('similar to', 'N more jobs'): the subject company
+        applies only to the first/lead link; later links are other companies."""
+        self.assertTrue(_subject_hint_is_first_link_only("New jobs similar to AI Test Architect at WSA \u2013 Wonderful Sound for All"))
+        self.assertTrue(_subject_hint_is_first_link_only("Senior QA Engineer at Lister Digital. 12 more jobs"))
+        self.assertTrue(_subject_hint_is_first_link_only("Test Automation Engineer at Testunity and 6 more jobs in India"))
+        # Single-job emails keep the hint for every extracted link
+        self.assertFalse(_subject_hint_is_first_link_only("Deepak, your application was sent to Kanerika Inc"))
+
+        from ai_extractor import build_jobs_from_real_links
+        links = [
+            {"url": "https://www.linkedin.com/comm/jobs/view/111/", "anchor_text": "AI Test Architect WSA \u2013 Wonderful Sound for All"},
+            {"url": "https://www.linkedin.com/comm/jobs/view/222/", "anchor_text": "Engineering Quality Lead \u2013 AI & Product Quality"},
+        ]
+        jobs = build_jobs_from_real_links(
+            links, "LinkedIn", False,
+            company_hint="WSA \u2013 Wonderful Sound for All",
+            hint_first_link_only=True,
+        )
+        self.assertEqual(jobs[0]["company_name"], "WSA \u2013 Wonderful Sound for All")
+        self.assertEqual(jobs[1]["company_name"], "Company from Email", "later links must not inherit the original job's company")
 
 if __name__ == "__main__":
     unittest.main()

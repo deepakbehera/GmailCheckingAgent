@@ -217,25 +217,58 @@ def _unwrap_tracking_redirects(candidates: List[tuple]) -> List[tuple]:
 
 
 def _company_from_subject(subject: str) -> str:
-    """Extracts the hiring company from Glassdoor digest subjects.
-    Handles the two weekly-digest formats:
-      \"Just in at TestVagrant: This week's employee reviews and more\"
-      \"Test Automation Engineer at Testunity and 6 more jobs in India for you. Apply Now\"
-    Glassdoor digests mention the company ONLY in the subject (the anchors
-    carry title/salary/location), so this fills the company field."""
+    """Extracts the hiring company from an email SUBJECT when the body/anchors
+    do not carry one. Handles the formats seen in real alert mail:
+
+      LinkedIn confirmation:   \"Deepak, your application was sent to Kanerika Inc\"
+      Glassdoor weekly digest: \"Just in at TestVagrant: This week's employee reviews and more\"
+      Glassdoor weekly digest: \"New jobs at Testunity! ...\"
+      Glassdoor/Indeed digest: \"Test Automation Engineer at Testunity and 6 more jobs in India for you. Apply Now\"
+      Indeed daily digest:     \"Senior QA Engineer at Lister Digital. 12 more senior software ... jobs in Bengaluru\"
+      LinkedIn similar-jobs:   \"New jobs similar to AI Test Architect at WSA – Wonderful Sound for All\"
+
+    Returns '' when no pattern matches (the caller keeps the anchor-derived
+    company or a generic placeholder)."""
     if not subject:
         return ""
-    m = re.search(r'\bjust in at\s+(.+?)\s*:', subject, re.IGNORECASE)
+
+    # LinkedIn application confirmations name exactly one company: the most
+    # trustworthy signal for every job linked inside such an email.
+    m = re.search(r"\bapplication (?:was )?(?:sent|submitted) to\s+(.+?)\s*$", subject, re.IGNORECASE)
     if m:
         return m.group(1).strip()
-    m = re.search(r'\bnew jobs? at\s+(.+?)\s*[:!]', subject, re.IGNORECASE)
+
+    m = re.search(r"\bjust in at\s+(.+?)\s*:", subject, re.IGNORECASE)
     if m:
         return m.group(1).strip()
-    # "TITLE at COMPANY and N more jobs ..." -> COMPANY (shortest match before
+    m = re.search(r"\bnew jobs? at\s+(.+?)\s*[:!]", subject, re.IGNORECASE)
+    if m:
+        return m.group(1).strip()
+
+    # LinkedIn 'similar jobs' digests: the company follows the LAST ' at '
+    # before the end of the subject (titles may contain ' at ' too, so take
+    # the last occurrence and strip trailing URL/ellipsis noise).
+    m = re.search(r"\b(?:new\s+)?jobs\s+similar\s+to\s+.+?\s+at\s+(.+?)\s*$", subject, re.IGNORECASE)
+    if m:
+        tail = m.group(1).strip().rstrip(".!")
+        tail = re.split(r"\s+https?://", tail)[0].strip()
+        # Cut a trailing dash-separated tagline: 'WSA – Wonderful Sound for All'
+        # is one brand, but 'X – tagline' patterns with generic words aren't.
+        if tail:
+            return _clean_company_name(tail)
+
+    # 'TITLE at COMPANY and N more jobs ...' -> COMPANY (shortest match before
     # the 'and N more jobs' marker so multi-word companies stay intact)
-    m = re.search(r'\bat\s+(.+?)\s+and\s+\d+\s*\+?\s*more\s+jobs?', subject, re.IGNORECASE)
+    m = re.search(r"\bat\s+(.+?)\s+and\s+\d+\s*\+?\s*more\s+jobs?", subject, re.IGNORECASE)
     if m:
         return m.group(1).strip()
+
+    # Indeed daily digests use a PERIOD between the lead job and the count:
+    # 'Senior QA Engineer at Lister Digital. 12 more senior ... jobs in ...'
+    m = re.search(r"\bat\s+(.+?)\.\s+\d+\s*\+?\s*more\b", subject, re.IGNORECASE)
+    if m:
+        return _clean_company_name(m.group(1))
+
     return ""
 
 
@@ -373,6 +406,66 @@ def titleize_anchor(text: str) -> str:
         t = t[:90].rsplit(' ', 1)[0]
     return t
 
+# Words that appear in job titles / tech stacks but NOT in company names.
+# Used to reject junk "companies" extracted from anchor tails like
+# 'Senior Software Engineer - .Net' -> '.Net' or '... - Manual QA' -> 'Manual QA'.
+_JUNK_COMPANY_WORDS = {
+    "net", "manual", "automation", "qa", "qtp", "selenium", "java", "python",
+    "rest", "api", "api's", "devops", "aws", "azure", "gcp", "sql", "nosql",
+    "react", "angular", "vue", "node", "nodejs", "django", "flask", "fastapi",
+    "tester", "testing", "test", "architect", "developer", "engineer",
+    "etl", "ios", "android", "fullstack", "frontend", "backend", "agile",
+    "jira", "docker", "kubernetes", "terraform", "cypress", "playwright",
+    "appium", "sap", "tableau", "powerbi", "salesforce", "servicenow",
+    # Placeholder texts that must never be mistaken for a real company
+    "company from email", "job from email", "unknown company", "unknown",
+    "n a", "na", "null", "email digest", "job alert",
+}
+
+# When an anchor tail BEGINS with one of these, it is almost always the
+# continuation of the job title (e.g. 'Engineering Quality Lead – AI &
+# Product Quality'), not a company name. Note the check is first-word-only:
+# a real company like 'Applied & Agentic AI Systems' merely CONTAINS 'ai'.
+_TECH_ACRONYM_STARTERS = {
+    "ai", "ml", "qa", "ui", "ux", "api", "net", "java", "python",
+    "data", "cloud", "devops", "fullstack", "automation", "testing",
+}
+
+
+def _looks_like_company(name: str) -> bool:
+    """Heuristic: does this fragment plausibly name a company?
+    Rejects tech-stack/job-role fragments ('.Net', 'Manual QA', 'Test
+    Architect', 'DFMA, CAD Software') so the caller can fall back to the
+    email-subject company hint instead of storing garbage."""
+    if not name:
+        return False
+    t = name.strip()
+    if len(t) < 2 or len(t) > 60:
+        return False
+    # Numbers, commas-as-lists, or leading punctuation are not companies
+    if re.search(r"\d", t):
+        return False
+    if t.startswith((".", "&", ",", "-", "|", "#")):
+        return False
+    if "," in t:  # 'DFMA, CAD Software' is a skill list, not a company
+        return False
+    words = [w for w in re.split(r"[\s/]+", t) if w]
+    if not words:
+        return False
+    # Whole-fragment match first (multi-word placeholders like
+    # 'Company from Email' / 'Job from Email' / 'Unknown Company')
+    if re.sub(r"[^a-z]", "", t.lower()) in {re.sub(r"[^a-z]", "", j) for j in _JUNK_COMPANY_WORDS}:
+        return False
+    # Any tech/job word disqualifies the whole fragment
+    for w in words:
+        if re.sub(r"[^a-z]", "", w.lower()) in _JUNK_COMPANY_WORDS:
+            return False
+    # All-lowercase or all-caps single short word is usually a skill token
+    if len(words) == 1 and len(t) <= 4 and t.islower():
+        return False
+    return True
+
+
 def parse_company_from_anchor(anchor: str) -> str:
     """Extracts the company name from a job link anchor text.
 
@@ -380,7 +473,8 @@ def parse_company_from_anchor(anchor: str) -> str:
       'KPMG India Python Ai Testing KPMG India · Bengaluru, ...'  -> KPMG India
       'GE HealthCare Staff Automation & Verification Lead GE HealthCare · ...' -> GE HealthCare
       'Engineer Software - Java Full Stack at Empower' -> Empower
-    """
+    Returns '' when the tail does not look like a company (tech-stack words,
+    skill lists), so callers fall back to the email-subject hint."""
     if not anchor:
         return ""
     t = re.sub(r'\s+', ' ', anchor).strip()
@@ -402,43 +496,78 @@ def parse_company_from_anchor(anchor: str) -> str:
                 return ' '.join(words[:n])
         # No repetition: try known company suffixes at the end
         m = re.search(r'([A-Z][A-Za-z0-9&. ]*\s(?:India|Inc|Corp|LLC|Labs|Technologies|Solutions|Group|HealthCare|Digital|Software|Systems))\s*$', before_dot)
-        if m:
+        if m and _looks_like_company(m.group(1)):
             return m.group(1).strip()
         # Single trailing capitalized word that is not a job word
         job_words = {'engineer', 'developer', 'manager', 'lead', 'testing',
                      'staff', 'senior', 'junior', 'principal', 'architect',
                      'analyst', 'specialist', 'ai', 'python', 'automation',
                      'verification', 'software', 'intern', 'associate', 'ml'}
-        if words and words[-1][0:1].isupper() and words[-1].lower().strip('&,') not in job_words:
+        if words and words[-1][0:1].isupper() and words[-1].lower().strip('&,') not in job_words and _looks_like_company(words[-1]):
             return words[-1]
         return ""
 
     # 'X at Y' / 'X - Y' patterns - but the tail must look like a company
-    # (title case, short, not a location/salary/experience fragment)
+    # (title case, short, not a location/salary/experience/tech fragment)
     for sep in [' at ', ' – ', ' - ', ' | ']:
         idx = t.lower().rfind(sep)
         if idx > 0:
             tail = t[idx + len(sep):].strip().rstrip('·,')
-            if 2 <= len(tail) <= 40 and not re.match(r'^(remote|hybrid|bengaluru|india|hyderabad|pune|mumbai|delhi|chennai|kolkata|gurgaon|noida|\d)', tail, re.IGNORECASE) and not re.search(r'\d', tail):
+            tail_words = tail.split()
+            first_word = re.sub(r'[^a-z]', '', tail_words[0].lower()) if tail_words else ''
+            if 2 <= len(tail) <= 40 and not re.match(r'^(remote|hybrid|bengaluru|india|hyderabad|pune|mumbai|delhi|chennai|kolkata|gurgaon|noida|\d)', tail, re.IGNORECASE) and not re.search(r'\d', tail) \
+                    and first_word not in _TECH_ACRONYM_STARTERS and _looks_like_company(tail):
                 return tail
 
     # Naukri style: 'TITLE LOCATION EXP SALARY SKILLS...' with no company
     # marker: fall back to empty (company stays generic).
     return ""
 
-def build_jobs_from_real_links(real_links: List[Dict[str, Any]], platform: str, is_confirmation: bool, company_hint: str = "") -> List[Dict[str, Any]]:
+def _hint_contains_company(hint: str, company: str) -> bool:
+    """True when the subject hint is a LONGER form of the anchor-derived
+    company (e.g. hint 'WSA – Wonderful Sound for All' contains anchor tail
+    'Wonderful Sound for All'). The fuller subject form wins in that case."""
+    if not hint or not company or hint == company:
+        return False
+    h = re.sub(r"[^a-z0-9]", "", hint.lower())
+    c = re.sub(r"[^a-z0-9]", "", company.lower())
+    return len(c) >= 4 and c in h
+
+
+def _subject_hint_is_first_link_only(subject: str) -> bool:
+    """True when the subject's company names only ONE job of the email, not
+    every job inside it. Multi-job digests ('X at Y and 6 more jobs',
+    'X at Y. 12 more ... jobs', 'New jobs similar to X at Y') carry jobs from
+    MANY companies; only the lead/original posting belongs to Y."""
+    s = subject or ""
+    if re.search(r"jobs\s+similar\s+to", s, re.IGNORECASE):
+        return True
+    # '... and N more jobs' / '... . N more ... jobs' digest markers
+    if re.search(r"\b\d+\s*\+?\s*more\b", s, re.IGNORECASE):
+        return True
+    return False
+
+
+def build_jobs_from_real_links(real_links: List[Dict[str, Any]], platform: str, is_confirmation: bool, company_hint: str = "", hint_first_link_only: bool = False) -> List[Dict[str, Any]]:
     """Creates one job card per real posting link found in the email body.
 
     The apply_url IS the exact link copied from the email ('Copy Link Address'),
     and the title/company come from the link's anchor text - so the dashboard's
     Apply Online button opens the exact job page from the email."""
     jobs = []
-    for link in real_links:
+    for link_index, link in enumerate(real_links):
         url = link["url"]
-        anchor = titleize_anchor(link.get("anchor_text", ""))
+        anchor = titleize_anchor(link.get("anchor_text", "")).replace('&amp;', '&')
         company = parse_company_from_anchor(anchor)
-        if not company and company_hint:
-            company = company_hint
+        hint_allowed = (link_index == 0) if hint_first_link_only else True
+        if company_hint and hint_allowed:
+            hint_ok = _looks_like_company(company_hint)
+            comp_ok = _looks_like_company(company)
+            # The subject-derived hint (e.g. 'Kanerika Inc' from an application
+            # confirmation, 'Lister Digital' from an Indeed digest lead job)
+            # beats a junk anchor tail - and a fuller hint beats a partial one.
+            if hint_ok and (not comp_ok or _hint_contains_company(company_hint, company)):
+                company = company_hint
         title = anchor
 
         # Clean the title: strip trailing location/company fragments
@@ -473,7 +602,7 @@ def build_jobs_from_real_links(real_links: List[Dict[str, Any]], platform: str, 
 
         jobs.append({
             "job_title": title or "Job from Email",
-            "company_name": company or "Company from Email",
+            "company_name": _clean_company_name(company) or "Company from Email",
             "location": "As per posting",
             "job_type": "Full-time",
             "apply_url": url,
@@ -491,10 +620,12 @@ def build_jobs_from_real_links(real_links: List[Dict[str, Any]], platform: str, 
 
 def _clean_company_name(name: str) -> str:
     """Strips trailing noise the plain-text regexes tend to capture into company
-    names (e.g. 'Stripe\nView and Apply', 'Stripe View job')."""
+    names (e.g. 'Stripe\nView and Apply', 'Stripe View job'), and unescapes
+    HTML entities that leak out of email hrefs ('Applied &amp; Agentic')."""
     if not name:
         return ""
     t = re.sub(r'\s+', ' ', name).strip()
+    t = t.replace('&amp;', '&').replace('&#38;', '&').replace('&nbsp;', ' ')
     t = re.split(r'\s+(?:View|Apply|Location|Salary|Exp|Rating|Estimated)\b', t, flags=re.IGNORECASE)[0]
     # Digest subjects bleed into heuristic company names:
     # 'Testunity and 6 more jobs' / 'AGS Aluminum Alloy and 6 more jobs in India'
@@ -547,7 +678,8 @@ class AIExtractor:
             is_confirmation = any(phrase in full_text for phrase in APPLICATION_CONFIRM_KEYWORDS)
             link_jobs = build_jobs_from_real_links(
                 real_links, platform, is_confirmation,
-                company_hint=_company_from_subject(subject)
+                company_hint=_company_from_subject(subject),
+                hint_first_link_only=_subject_hint_is_first_link_only(subject)
             )
 
             if api_key:
@@ -564,7 +696,8 @@ class AIExtractor:
                 if extracted_jobs:
                     self._enrich_jobs_with_real_links(
                         extracted_jobs, html_body, body, platform,
-                        company_hint=_company_from_subject(subject)
+                        company_hint=_company_from_subject(subject),
+                        hint_first_link_only=_subject_hint_is_first_link_only(subject)
                     )
                     return extracted_jobs
             except Exception as e:
@@ -574,7 +707,8 @@ class AIExtractor:
         jobs = dedupe_jobs(jobs)
         self._enrich_jobs_with_real_links(
             jobs, html_body, body, platform,
-            company_hint=_company_from_subject(subject)
+            company_hint=_company_from_subject(subject),
+            hint_first_link_only=_subject_hint_is_first_link_only(subject)
         )
         return jobs
 
@@ -616,7 +750,7 @@ Return ONLY raw JSON (no backticks) with this schema:
     {{
       "index": <same index as input>,
       "job_title": string (concise real job title; do not include company or location in it),
-      "company_name": string (company hiring; "Unknown" only if truly undeterminable),
+      "company_name": string (name of the HIRING COMPANY as an organisation, e.g. 'Kanerika Inc', 'GoDaddy'. NEVER a technology, skill, or job role such as '.Net', 'Manual QA', 'Test Architect', 'Java' - if the company is not identifiable from the link or email context, use the subject line or "Unknown"),
       "location": string,
       "job_type": string,
       "salary": string ("Not specified" if absent),
@@ -658,7 +792,7 @@ One entry per input link, same order, same count ({len(jobs)}).
             else:
                 logger.warning(f"Gemini link enrichment failed (cards keep anchor-based details): {e}")
 
-    def _enrich_jobs_with_real_links(self, jobs: List[Dict[str, Any]], html_body: str, body: str, platform: str, company_hint: str = ""):
+    def _enrich_jobs_with_real_links(self, jobs: List[Dict[str, Any]], html_body: str, body: str, platform: str, company_hint: str = "", hint_first_link_only: bool = False):
         """Matches extracted jobs to real links found in the email body.
 
         Priority: a real posting URL from the email always wins. A generated
@@ -669,7 +803,7 @@ One entry per input link, same order, same count ({len(jobs)}).
         real_links = extract_real_job_links(html_body, body, platform)
         used_links = set()
 
-        for j in jobs:
+        for job_index, j in enumerate(jobs):
             job_url = (j.get("apply_url") or "").strip()
             is_generated_fallback = (
                 not job_url.startswith("http")
@@ -711,12 +845,19 @@ One entry per input link, same order, same count ({len(jobs)}).
                 if anchor_title and (not j.get("job_title") or j.get("job_title") in ("Specialist Role", "Unknown Role")):
                     j["job_title"] = anchor_title
             # Fill the company from the digest subject when the AI/heuristics
-            # could not determine it (Glassdoor weekly digests mention the
-            # company only in the subject line).
-            if company_hint and j.get("company_name", "") in ("", "Unknown Company", "Company from Email"):
+            # could not determine a plausible one (Glassdoor weekly digests
+            # mention the company only in the subject line). Junk fragment
+            # companies ('Manual QA', '.Net') are replaced by the hint.
+            hint_allowed = (job_index == 0) if hint_first_link_only else True
+            if (company_hint and hint_allowed
+                    and _looks_like_company(company_hint)
+                    and not _looks_like_company(j.get("company_name", ""))):
                 j["company_name"] = company_hint
-            else:
-                # No real link matched: fall back to platform search link
+
+            if not (best and best_score >= 1):
+                # No real link matched: fall back to platform search link.
+                # (Deliberately separate from the company fill above: the old
+                # else-branch here clobbered already-matched real links.)
                 j["apply_url"] = make_working_url(
                     j.get("job_title", "Engineer"),
                     j.get("company_name", "Company"),
