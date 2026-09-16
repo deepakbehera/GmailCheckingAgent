@@ -6,14 +6,16 @@ from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 from typing import Optional, Dict, Any, List
 from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
-from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse, FileResponse
+from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse, FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from config import APP_TITLE, VERSION, BASE_DIR, PORT
+from config import APP_TITLE, VERSION, BASE_DIR, PORT, RESUME_CACHE_DIR
+import resume_tailor
 from database import (
     get_all_jobs,
+    get_tailored_resume,
     get_job_by_id,
     update_job_status,
     mark_job_checked,
@@ -427,6 +429,89 @@ async def api_dedupe_jobs():
         "message": f"Removed {deleted} duplicate job(s)." if deleted else "No duplicates found — dashboard is clean.",
         "deleted": deleted
     }
+
+# --- Tailored Resume Endpoints ---------------------------------------------
+
+@app.post("/api/jobs/{job_id}/tailor-resume")
+async def api_tailor_resume(job_id: int, force: Optional[str] = None):
+    """Generates the job-tailored resume PDF for one job posting.
+
+    Saves '<nn>_<Job_Name>_<Company_Name>.pdf' to the configured output
+    folder (D:\\TaileredResume by default) plus the server-side cache, and
+    caches the PDF bytes in the database for the View/Download buttons.
+    Pass ?force=true to regenerate even if a tailored resume already exists."""
+    job = get_job_by_id(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    api_key = ai_extractor.get_api_key()
+    result = resume_tailor.generate_tailored_resume(
+        job, force=(str(force).lower() == "true"), gemini_api_key=api_key
+    )
+    if result.get("status") != "success":
+        raise HTTPException(status_code=500, detail=result.get("error", "Resume generation failed"))
+
+    # pdf_bytes is binary: it is served via the view/download endpoints, not JSON.
+    result.pop("pdf_bytes", None)
+
+    try:
+        await job_scheduler.broadcast_event("JOB_RESUME_READY", {
+            "job_id": job_id, "file_name": result["file_name"]
+        })
+    except Exception:
+        pass
+    return result
+
+
+def _resume_file_response(job_id: int, download: bool):
+    """Streams the tailored PDF for a job: DB blob first, file cache second."""
+    job = get_job_by_id(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    file_name = job.get("resume_file") or ""
+    pdf_bytes: Optional[bytes] = None
+
+    cached = get_tailored_resume(job)
+    if cached:
+        file_name = cached.get("file_name") or file_name
+        data = cached.get("pdf_bytes")
+        if isinstance(data, memoryview):
+            data = data.tobytes()
+        pdf_bytes = bytes(data) if data else None
+
+    if not pdf_bytes and file_name:
+        for folder in (RESUME_CACHE_DIR,):
+            candidate = folder / file_name
+            if candidate.exists():
+                pdf_bytes = candidate.read_bytes()
+                break
+
+    if not pdf_bytes:
+        raise HTTPException(status_code=404, detail=
+            "No tailored resume for this job yet. Click 'Tailor Resume' first.")
+
+    media = "application/pdf"
+    if download:
+        return Response(
+            content=pdf_bytes, media_type=media,
+            headers={"Content-Disposition": f'attachment; filename="{file_name}"'}
+        )
+    return Response(content=pdf_bytes, media_type=media,
+                    headers={"Content-Disposition": f'inline; filename="{file_name}"'})
+
+
+@app.get("/api/jobs/{job_id}/resume/view")
+async def api_view_resume(job_id: int):
+    """Opens the job's tailored resume PDF inline in the browser."""
+    return _resume_file_response(job_id, download=False)
+
+
+@app.get("/api/jobs/{job_id}/resume/download")
+async def api_download_resume(job_id: int):
+    """Downloads the job's tailored resume PDF with its unique file name."""
+    return _resume_file_response(job_id, download=True)
+
 
 @app.get("/api/stats")
 async def api_get_stats():

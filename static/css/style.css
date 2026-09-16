@@ -722,6 +722,37 @@ header.app-header {
   border-color: rgba(239, 68, 68, 0.35);
 }
 
+/* Tailored resume buttons */
+.btn-resume-tailor {
+  background: rgba(99, 102, 241, 0.15);
+  color: #a5b4fc;
+  border: 1px solid rgba(99, 102, 241, 0.4);
+}
+.btn-resume-tailor:hover:not(:disabled) {
+  background: rgba(99, 102, 241, 0.3);
+  color: #c7d2fe;
+}
+.btn-resume-tailor:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+.btn-resume-view {
+  background: rgba(16, 185, 129, 0.12);
+  color: #6ee7b7;
+  border: 1px solid rgba(16, 185, 129, 0.35);
+}
+.btn-resume-view:hover {
+  background: rgba(16, 185, 129, 0.25);
+}
+.btn-resume-download {
+  background: rgba(245, 158, 11, 0.12);
+  color: #fcd34d;
+  border: 1px solid rgba(245, 158, 11, 0.35);
+}
+.btn-resume-download:hover {
+  background: rgba(245, 158, 11, 0.25);
+}
+
 /* Stat cards for the new statuses */
 .stat-card.review::after { background: var(--review-amber); }
 .stat-card.see-later::after { background: var(--see-later-cyan); }

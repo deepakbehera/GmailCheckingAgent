@@ -472,6 +472,23 @@ function renderJobs(jobs) {
       </button>
     `;
 
+    // Tailored resume buttons (View / Download are live once a resume
+    // exists; Tailor generates or regenerates it with AI).
+    const hasResume = Boolean(job.resume_file);
+    const resumeButtons = `
+      <button class="btn btn-resume-tailor" onclick="tailorResume(${job.id}, this)" title="Generate a job-tailored resume PDF (${escapeHtml(job.company_name)})">
+        <span>🤖 Tailor Resume</span>
+      </button>
+      ${hasResume ? `
+        <a href="${API_BASE}/api/jobs/${job.id}/resume/view" target="_blank" rel="noopener" class="btn btn-resume-view" title="View tailored resume PDF">
+          <span>👁️ View Resume</span>
+        </a>
+        <a href="${API_BASE}/api/jobs/${job.id}/resume/download" class="btn btn-resume-download" title="Download ${escapeHtml(job.resume_file)}">
+          <span>⬇️ Download Resume</span>
+        </a>
+      ` : ''}
+    `;
+
     // Applied Toggle Button
     const appliedToggleBtn = isApplied ? `
       <button class="btn btn-applied-toggle btn-applied-active" onclick="toggleAppliedStatus(${job.id}, 'APPLIED')" title="Click to unmark as applied">
@@ -520,6 +537,7 @@ function renderJobs(jobs) {
               <span>🔍 Details</span>
             </button>
             ${appliedToggleBtn}
+            ${resumeButtons}
             ${applyButton}
             ${deleteButton}
           </div>
@@ -617,6 +635,77 @@ async function deleteSingleJob(jobId) {
     console.error('Error deleting job:', err);
     showToast('Failed to delete job', 'error');
   }
+}
+
+// --- Tailored Resume Actions ---
+
+async function tailorResume(jobId, btn) {
+  if (btn) {
+    btn.disabled = true;
+    btn.dataset.orig = btn.innerHTML;
+    btn.innerHTML = '<span>⏳ Tailoring...</span>';
+  }
+  try {
+    const res = await fetch(`${API_BASE}/api/jobs/${jobId}/tailor-resume`, { method: 'POST' });
+    const data = await res.json();
+    if (res.ok && data.status === 'success') {
+      const engine = data.engine === 'gemini' ? 'Gemini AI' : (data.cached ? 'cache' : 'rules');
+      showToast(`📄 Tailored resume ready: ${data.file_name} (${engine})`, 'success');
+      if (data.match_note) {
+        setTimeout(() => showToast(`💡 ${data.match_note}`, 'info'), 800);
+      }
+      await loadJobs();
+      // Open the fresh PDF right away so the user can review it.
+      window.open(`${API_BASE}/api/jobs/${jobId}/resume/view`, '_blank');
+    } else {
+      showToast(data.detail || 'Resume tailoring failed', 'error');
+    }
+  } catch (err) {
+    console.error('Error tailoring resume:', err);
+    showToast('Resume tailoring failed - check server logs', 'error');
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      if (btn.dataset.orig) btn.innerHTML = btn.dataset.orig;
+    }
+  }
+}
+
+async function openResumesModal() {
+  document.getElementById('resumes-modal').classList.add('active');
+  const body = document.getElementById('resumes-body');
+  body.innerHTML = '<p>Loading tailored resumes...</p>';
+  try {
+    const res = await fetchWithRetry(`${API_BASE}/api/jobs?status=ALL`);
+    const data = await res.json();
+    const withResume = (data.jobs || []).filter(j => j.resume_file);
+    if (!withResume.length) {
+      body.innerHTML = `
+        <p style="color:var(--text-muted);">No tailored resumes yet. Click <strong>🤖 Tailor Resume</strong> on any job card to generate one.</p>
+      `;
+      return;
+    }
+    body.innerHTML = withResume.map(j => `
+      <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; padding:10px; border:1px solid var(--border-color); border-radius:8px; margin-bottom:8px; background:rgba(0,0,0,0.25);">
+        <div style="min-width:0;">
+          <div style="font-weight:600; color:#c7d2fe; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">📄 ${escapeHtml(j.resume_file)}</div>
+          <div style="font-size:0.8rem; color:var(--text-dim);">${escapeHtml(j.job_title)} @ ${escapeHtml(j.company_name)}</div>
+        </div>
+        <div style="display:flex; gap:6px; flex-shrink:0;">
+          <a class="btn btn-secondary" style="font-size:0.8rem; padding:4px 10px;" href="${API_BASE}/api/jobs/${j.id}/resume/view" target="_blank" rel="noopener">👁️ View</a>
+          <a class="btn btn-primary" style="font-size:0.8rem; padding:4px 10px;" href="${API_BASE}/api/jobs/${j.id}/resume/download">⬇️ Download</a>
+        </div>
+        <button class="btn btn-delete-job" onclick="tailorResume(${j.id}, this)" title="Regenerate with AI">🔄</button>
+      </div>
+    `).join('');
+  } catch (err) {
+    console.error('Error loading resumes:', err);
+    body.innerHTML = '<p style="color:#f87171;">Failed to load tailored resumes.</p>';
+  }
+}
+
+function closeResumesModal() {
+  document.getElementById('resumes-modal').classList.remove('active');
 }
 
 // --- Trigger Manual Check & Simulation ---
@@ -944,6 +1033,19 @@ ${escapeHtml(job.raw_email_snippet || 'No email snippet available.')}
         </div>
 
         ${historyHtml}
+
+        ${job.resume_file ? `
+        <div class="form-group">
+          <label>Tailored Resume</label>
+          <div style="display:flex; gap:8px; align-items:center; background:rgba(0,0,0,0.3); padding:10px 12px; border-radius:8px;">
+            <span style="font-size:0.85rem; color:#6ee7b7; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">📄 ${escapeHtml(job.resume_file)}</span>
+            <div style="margin-left:auto; display:flex; gap:6px; flex-shrink:0;">
+              <a class="btn btn-secondary" style="font-size:0.8rem; padding:4px 10px;" href="${API_BASE}/api/jobs/${job.id}/resume/view" target="_blank" rel="noopener">👁️ View</a>
+              <a class="btn btn-primary" style="font-size:0.8rem; padding:4px 10px;" href="${API_BASE}/api/jobs/${job.id}/resume/download">⬇️ Download</a>
+            </div>
+          </div>
+        </div>
+        ` : ''}
 
         <div class="form-group">
           <label>Job Status</label>

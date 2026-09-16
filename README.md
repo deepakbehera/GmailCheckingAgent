@@ -26,7 +26,14 @@ An intelligent, autonomous AI agent that monitors **`deepak.gvit@gmail.com`** ev
 5. **🎯 Strikethrough & Red Marker for Applied Jobs**:
    - When a job is marked as **Applied** (or when an application confirmation email is received), the job is **struck through with a red line** and prominently labeled with a pulsing **`ALREADY APPLIED`** red badge.
 
-6. **💻 Consolidated Glassmorphic Local Dashboard**:
+6. **📄 AI-Tailored Resumes per Job**:
+   - **🤖 Tailor Resume** button on every job card generates `NN_<Job_Name>_<Company_Name>.pdf` (e.g. `07_Senior_Test_Automation_Engineer_Infosys.pdf`).
+   - Rewrites the text content of your master resume **in place** — fonts, sizes and layout stay identical.
+   - **Gemini AI** rewrites the headline, professional summary and competency sections with the job's keywords; rule-based fallback when no API key is set.
+   - **👁️ View** opens the PDF in the browser; **⬇️ Download** saves it with its unique name for applying.
+   - Saved locally to `D:\TaileredResume\` and streamed from the dashboard, plus **📄 My Tailored Resumes** in the header lists every generated PDF.
+
+7. **💻 Consolidated Glassmorphic Local Dashboard**:
    - Fast filtering (*All*, *Open Roles*, *Applied / Strikethrough*).
    - Real-time search across job title, company, skills, and location.
    - Built-in **"Check Gmail Now"** and **"Simulate Job Email"** buttons for one-click testing.
@@ -83,6 +90,7 @@ c:\Users\beher\GmailCheckingAgent/
 ├── ai_extractor.py            # Gemini AI structured job extractor with fallback
 ├── job_matcher.py             # Duplicate company and past application matcher
 ├── notification_service.py    # Desktop Windows toast and Mobile ntfy.sh push
+├── resume_tailor.py           # Gemini job-tailored resume PDF generator (in-place text swap)
 ├── test_suite.py              # Automated test suite (all passed)
 ├── verify_live_server.py      # Live server endpoint verification script
 ├── requirements.txt           # Python dependencies
@@ -103,4 +111,15 @@ python test_suite.py
 Or verify the live server:
 ```bash
 python verify_live_server.py
+```
+
+### Tailored Resume Testing
+```bash
+# Generate a test tailored resume from the CLI
+python resume_tailor.py --title "Senior Test Automation Engineer" --company "Infosys" \
+    --skills "Playwright,Python,AWS" --job-id 1 --force
+
+# (One-time, local only) upload the master resume PDF into the database so the
+# Vercel serverless function can read it: keeps the PII out of the public repo
+python resume_tailor.py --seed-base
 ```

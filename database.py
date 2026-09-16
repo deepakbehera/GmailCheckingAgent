@@ -1,12 +1,15 @@
 import sqlite3
 import json
+import logging
 import os
 import re
 import urllib.parse
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from typing import List, Dict, Any, Optional
-from config import DB_PATH, DEFAULT_TARGET_EMAIL, DEFAULT_CHECK_INTERVAL_MINS, DEFAULT_NTFY_TOPIC, DEFAULT_DESKTOP_NOTIFY, DEFAULT_MOBILE_NOTIFY, DEFAULT_AUTH_MODE
+from config import (DB_PATH, DEFAULT_TARGET_EMAIL, DEFAULT_CHECK_INTERVAL_MINS, DEFAULT_NTFY_TOPIC,
+                    DEFAULT_DESKTOP_NOTIFY, DEFAULT_MOBILE_NOTIFY, DEFAULT_AUTH_MODE,
+                    RESUME_BASE_PDF)
 
 # ---------------------------------------------------------------------------
 # Dual-backend database layer:
@@ -126,6 +129,9 @@ _JOBS_COLUMNS = """
     previous_applied_date TEXT,
     previous_job_title TEXT,
     match_score INTEGER DEFAULT 80,
+    resume_file TEXT,
+    resume_generated_at TEXT,
+    resume_match_summary TEXT,
     created_at TEXT,
     updated_at TEXT
 """
@@ -136,6 +142,15 @@ def _create_schema(cursor):
         CREATE TABLE IF NOT EXISTS jobs (
             id SERIAL PRIMARY KEY,
             {_JOBS_COLUMNS}
+        );
+        """)
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS tailored_resumes (
+            job_key TEXT PRIMARY KEY,
+            file_name TEXT NOT NULL,
+            pdf_bytes BYTEA,
+            generated_at TEXT,
+            engine TEXT
         );
         """)
         cursor.execute("""
@@ -175,6 +190,15 @@ def _create_schema(cursor):
         CREATE TABLE IF NOT EXISTS jobs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             {_JOBS_COLUMNS}
+        );
+        """)
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS tailored_resumes (
+            job_key TEXT PRIMARY KEY,
+            file_name TEXT NOT NULL,
+            pdf_bytes BLOB,
+            generated_at TEXT,
+            engine TEXT
         );
         """)
         cursor.execute("""
@@ -221,6 +245,24 @@ def _create_schema(cursor):
     else:
         try:
             cursor.execute("ALTER TABLE jobs ADD COLUMN source_platform TEXT DEFAULT 'Direct'")
+        except sqlite3.OperationalError:
+            pass
+
+    # Alter table if resume_file is missing from earlier schema (tailored
+    # resume tracking per job).
+    if IS_POSTGRES:
+        cursor.execute("SELECT COUNT(*) AS cnt FROM information_schema.columns WHERE table_name = 'jobs' AND column_name = 'resume_file'")
+        row = cursor.fetchone()
+        col_count = row["cnt"] if hasattr(row, "get") or isinstance(row, dict) else row[0]
+        if not col_count:
+            cursor.execute("ALTER TABLE jobs ADD COLUMN resume_file TEXT")
+            cursor.execute("ALTER TABLE jobs ADD COLUMN resume_generated_at TEXT")
+            cursor.execute("ALTER TABLE jobs ADD COLUMN resume_match_summary TEXT")
+    else:
+        try:
+            cursor.execute("ALTER TABLE jobs ADD COLUMN resume_file TEXT")
+            cursor.execute("ALTER TABLE jobs ADD COLUMN resume_generated_at TEXT")
+            cursor.execute("ALTER TABLE jobs ADD COLUMN resume_match_summary TEXT")
         except sqlite3.OperationalError:
             pass
 
@@ -839,6 +881,129 @@ def update_settings(settings_dict: Dict[str, str]):
         """, (k, str(v), now_str))
     conn.commit()
     conn.close()
+
+# --- Tailored Resume Operations --------------------------------------------
+
+def _resume_job_key(job: Dict[str, Any]) -> str:
+    """Stable identity for a job posting used as the tailored-resume cache key
+    (same company + title = same tailored resume, even if re-alerted)."""
+    company = _norm_company(job.get("company_name"))
+    title = re.sub(r"[^a-z0-9]", "", (job.get("job_title") or "").lower())
+    return f"{company}::{title}"
+
+
+def _sanitize_filename(text: str, max_len: int = 40) -> str:
+    """Filesystem-safe compact slug (e.g. 'Senior_Test_Automation')."""
+    slug = re.sub(r"[^A-Za-z0-9]+", "_", (text or "").strip()).strip("_")
+    return (slug[:max_len].rstrip("_") or "Role")
+
+
+def build_resume_filename(job: Dict[str, Any], seq: int) -> str:
+    """Unique per-job resume name: '<nn>_<Job_Name>_<Company_Name>.pdf'.
+    <nn> is the job's database id, zero-padded, so each job keeps a stable,
+    human-sortable unique number tied to the dashboard record."""
+    return f"{seq:02d}_{_sanitize_filename(job.get('job_title'))}_{_sanitize_filename(job.get('company_name'))}.pdf"
+
+
+def save_tailored_resume(job: Dict[str, Any], file_name: str, pdf_bytes: bytes,
+                         generated_at: str, engine: str = "gemini",
+                         match_summary: str = "") -> str:
+    """Persists a tailored resume against the job row AND caches the PDF bytes
+    (Postgres / local SQLite). Returns the canonical file name."""
+    key = _resume_job_key(job)
+    job_id = job.get("id")
+    now_str = datetime.now(timezone.utc).isoformat()
+    conn = get_db()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+        INSERT INTO tailored_resumes (job_key, file_name, pdf_bytes, generated_at, engine)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(job_key) DO UPDATE SET
+            file_name = excluded.file_name,
+            pdf_bytes = excluded.pdf_bytes,
+            generated_at = excluded.generated_at,
+            engine = excluded.engine
+        """, (key, file_name, _pg_binary(pdf_bytes), generated_at, engine))
+        if job_id is not None:
+            cursor.execute("""
+            UPDATE jobs SET resume_file = ?, resume_generated_at = ?, resume_match_summary = ?, updated_at = ?
+            WHERE id = ?
+            """, (file_name, now_str, match_summary, now_str, job_id))
+        conn.commit()
+    finally:
+        conn.close()
+    return file_name
+
+
+def get_tailored_resume(job: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Returns the cached tailored-resume row for a job, or None."""
+    key = _resume_job_key(job)
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT job_key, file_name, pdf_bytes, generated_at, engine FROM tailored_resumes WHERE job_key = ?", (key,))
+    row = cursor.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def _pg_binary(data: Optional[bytes]):
+    """Wraps bytes for Postgres BYTEA inserts (no-op for SQLite)."""
+    if data is None:
+        return None
+    if IS_POSTGRES:
+        import psycopg2
+        return psycopg2.Binary(data)
+    return data
+
+
+def ensure_base_resume_blob() -> bool:
+    """Copies the base resume PDF into tailored_resumes under the reserved key
+    '__base__' (local file into Postgres, or file blob into SQLite) so the
+    Vercel serverless function can always read the master resume.
+
+    Returns True when the blob is available afterwards."""
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        pdf_bytes = None
+        if IS_POSTGRES:
+            with open(RESUME_BASE_PDF, "rb") as f:
+                pdf_bytes = f.read()
+        now_str = datetime.now(timezone.utc).isoformat()
+        cursor.execute("""
+        INSERT INTO tailored_resumes (job_key, file_name, pdf_bytes, generated_at, engine)
+        VALUES ('__base__', 'Deepak_Kumar_Behera_Resume.pdf', ?, ?, 'base')
+        ON CONFLICT(job_key) DO UPDATE SET pdf_bytes = excluded.pdf_bytes, generated_at = excluded.generated_at
+        """, (_pg_binary(pdf_bytes), now_str))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        logging.warning(f"ensure_base_resume_blob failed: {e}")
+        return False
+
+
+def get_base_resume_blob() -> Optional[bytes]:
+    """Returns the master resume PDF bytes: from the local file when present,
+    otherwise from the '__base__' blob row (Vercel)."""
+    try:
+        with open(RESUME_BASE_PDF, "rb") as f:
+            return f.read()
+    except OSError:
+        pass
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT pdf_bytes FROM tailored_resumes WHERE job_key = '__base__'")
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        return None
+    data = row["pdf_bytes"]
+    if isinstance(data, memoryview):
+        data = data.tobytes()
+    return bytes(data) if data else None
+
 
 def get_dashboard_stats() -> Dict[str, Any]:
     conn = get_db()

@@ -61,6 +61,21 @@ GMAIL_TOKEN_FILE = BASE_DIR / "token.json"
 HOST = os.getenv("HOST", "127.0.0.1")
 PORT = int(os.getenv("PORT", "8000"))
 
+# --- Tailored Resume Generation -------------------------------------------
+# Base resume PDF (the master copy to tailor from). Kept in the gitignored
+# data/ folder so the PII never lands in the public GitHub repo.
+RESUME_BASE_PDF = Path(os.getenv("RESUME_BASE_PDF", BASE_DIR / "data" / "Deepak_Kumar_Behera_Resume.pdf"))
+
+# Where tailored PDFs are saved on this machine (D:\TaileredResume\ locally).
+# On Vercel the filesystem is read-only except /tmp, so PDFs are only cached
+# there; the user downloads them from the dashboard instead.
+RESUME_OUTPUT_DIR = Path(os.getenv("RESUME_OUTPUT_DIR", "D:/TaileredResume"))
+
+# Repo-side cache folder for tailored PDFs (gitignored via data/). The
+# dashboard View/Download buttons stream the PDF from here.
+RESUME_CACHE_DIR = Path(os.getenv("RESUME_CACHE_DIR", BASE_DIR / "data" / "resumes"))
+
+# --- Public dashboard URL ------------------------------------------------
 # Public dashboard URL used in push-notification action buttons (ntfy
 # "Open Dashboard"). The Vercel deployment URL must always win here: on the
 # serverless deployment there is no cloudflared tunnel, but the settings table
